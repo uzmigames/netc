@@ -9,6 +9,7 @@
 
 #include "../../include/netc.h"
 #include "../util/netc_platform.h"
+#include "../algo/netc_tans.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -28,8 +29,8 @@
 /**
  * netc_dict_t — trained probability model.
  *
- * In Phase 1 (passthrough baseline), this holds only the model_id and
- * basic metadata. Full frequency tables are added in Phase 2 (ANS codec).
+ * Holds per-context-bucket tANS tables built from training data.
+ * One table per context bucket (RFC-001 §6.2): HEADER, SUBHEADER, BODY, TAIL.
  */
 struct netc_dict {
     uint32_t magic;      /* NETC_DICT_MAGIC — sanity check */
@@ -37,8 +38,8 @@ struct netc_dict {
     uint8_t  model_id;   /* 1–254; 0 = passthrough only; 255 = reserved */
     uint16_t _pad;
 
-    /* Phase 2: frequency tables per context bucket */
-    /* uint32_t freq[4][256]; */
+    /* Per-context-bucket tANS tables (Phase 2) */
+    netc_tans_table_t tables[NETC_CTX_COUNT];
 
     uint32_t checksum;   /* CRC32 of all preceding fields */
 };
