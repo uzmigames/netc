@@ -132,3 +132,62 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --timeout 60
+
+  # ===========================================================================
+  # Benchmark CI — Linux Release, all workloads, --ci-check gate
+  # Uploads results as artifact; no Oodle in CI.
+  # ===========================================================================
+  benchmark:
+    name: Benchmark CI gates
+    runs-on: ubuntu-22.04
+    needs: [build-linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake ninja-build \
+            zlib1g-dev liblz4-dev libzstd-dev
+
+      - name: Configure (Release + bench + zlib + lz4 + zstd)
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNETC_BUILD_TESTS=OFF \
+            -DNETC_BUILD_BENCH=ON \
+            -DNETC_ENABLE_SANITIZERS=OFF
+
+      - name: Build bench
+        run: cmake --build build --target bench -j$(nproc)
+
+      - name: Run benchmarks (all workloads, JSON output)
+        run: |
+          ./build/bench/bench \
+            --count=10000 \
+            --warmup=500 \
+            --seed=42 \
+            --train=5000 \
+            --compressor=all \
+            --format=json \
+            --output=bench_results.json
+
+      - name: Run CI gate check (netc only, full count)
+        run: |
+          ./build/bench/bench \
+            --count=100000 \
+            --warmup=1000 \
+            --seed=42 \
+            --train=50000 \
+            --compressor=netc \
+            --ci-check \
+            --format=table
+        continue-on-error: true   # gates may fail on CI hardware; record but don't block
+
+      - name: Upload benchmark results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench_results.json
+          retention-days: 30

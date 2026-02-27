@@ -17,8 +17,12 @@ set(BENCH_SOURCES
     bench_corpus.c
     bench_stats.c
     bench_reporter.c
+    bench_compressor.c
     bench_netc.c
     bench_runner.c
+    bench_zlib.c
+    bench_lz4.c
+    bench_zstd.c
     bench_main.c
 )
 
