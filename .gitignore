@@ -29,10 +29,11 @@ out/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
-Makefile
-*.cmake
+# Makefile and cmake/ are source files — not ignored
 *.ninja
 compile_commands.json
+# Generated Makefiles from cmake (in build dirs, already covered by build/)
+# Do NOT add bare "Makefile" here — the project root Makefile is source
 
 # Compiled objects and libraries
 *.o
