@@ -11,6 +11,7 @@
 #include "../util/netc_platform.h"
 #include "../algo/netc_tans.h"
 #include "../algo/netc_delta.h"
+#include "../simd/netc_simd.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -65,6 +66,9 @@ struct netc_ctx {
     uint8_t           *ring;          /* Ring buffer for history (NULL in stateless) */
     uint32_t           ring_size;     /* Allocated ring buffer size */
     uint32_t           ring_pos;      /* Current write position (wraps) */
+
+    /* --- SIMD dispatch table (set at ctx_create, read-only in hot path) --- */
+    netc_simd_ops_t    simd_ops;      /* Best available bulk operation implementations */
 
     /* --- Delta prediction state (stateful mode) --- */
     uint8_t           *prev_pkt;      /* Copy of last packet before delta (for encoder/decoder symmetry) */

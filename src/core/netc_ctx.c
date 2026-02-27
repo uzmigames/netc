@@ -41,6 +41,9 @@ netc_ctx_t *netc_ctx_create(const netc_dict_t *dict, const netc_cfg_t *cfg) {
     ctx->simd_level        = cfg->simd_level;
     ctx->context_seq       = 0;
 
+    /* Initialize SIMD dispatch table (auto-detects best available path) */
+    netc_simd_ops_init(&ctx->simd_ops, (uint8_t)cfg->simd_level);
+
     /* Allocate ring buffer for stateful mode */
     if (cfg->flags & NETC_CFG_FLAG_STATEFUL) {
         ctx->ring_size = (cfg->ring_buffer_size > 0)

@@ -163,9 +163,10 @@ netc_result_t netc_decompress(
                 ctx->prev_pkt != NULL &&
                 ctx->prev_pkt_size == *dst_size)
             {
-                /* dst currently holds residuals; reconstruct original in-place */
-                netc_delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
-                                  (uint8_t *)dst, *dst_size);
+                /* dst currently holds residuals; reconstruct original in-place
+                 * via SIMD dispatch */
+                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
+                                           (uint8_t *)dst, *dst_size);
             }
 
             /* Update delta predictor with reconstructed original bytes */

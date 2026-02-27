@@ -65,12 +65,22 @@ include(CheckCCompilerFlag)
 
 set(NETC_SIMD_FLAGS "")
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
+if(MSVC)
+    # MSVC x64: SSE4.2 and AVX2 intrinsics are always available via immintrin.h.
+    # Runtime detection (CPUID) happens in netc_simd_generic.c.
+    # /arch:AVX2 enables AVX2 code generation; without it MSVC will still compile
+    # the intrinsic calls but the optimizer won't auto-vectorize with AVX2.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$" OR CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+        add_compile_definitions(NETC_SIMD_SSE42=1 NETC_SIMD_AVX2=1)
+        # /arch:AVX2 — enables AVX2 code generation for the entire library
+        list(APPEND NETC_SIMD_FLAGS "/arch:AVX2")
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
     check_c_compiler_flag("-msse4.2" NETC_HAS_SSE42)
     check_c_compiler_flag("-mavx2"   NETC_HAS_AVX2)
     if(NETC_HAS_AVX2)
         list(APPEND NETC_SIMD_FLAGS "-mavx2")
-        add_compile_definitions(NETC_SIMD_AVX2=1)
+        add_compile_definitions(NETC_SIMD_AVX2=1 NETC_SIMD_SSE42=1)
     elseif(NETC_HAS_SSE42)
         list(APPEND NETC_SIMD_FLAGS "-msse4.2")
         add_compile_definitions(NETC_SIMD_SSE42=1)
@@ -93,12 +103,12 @@ set(NETC_CORE_SOURCES
     src/core/netc_decompress.c
     src/algo/netc_tans.c
     src/util/netc_crc32.c
+    src/simd/netc_simd_generic.c
+    src/simd/netc_simd_sse42.c
+    src/simd/netc_simd_avx2.c
 )
 
-# Phase 3+ sources (added as they are implemented):
-# src/simd/netc_simd_generic.c
-# src/simd/netc_simd_sse42.c
-# src/simd/netc_simd_avx2.c
+# NEON added when compiling for ARM:
 # src/simd/netc_simd_neon.c
 
 # =============================================================================
@@ -159,6 +169,7 @@ if(NETC_BUILD_TESTS)
     add_netc_test(test_compress   tests/test_compress.c)
     add_netc_test(test_tans_debug tests/test_tans_debug.c)
     add_netc_test(test_delta      tests/test_delta.c)
+    add_netc_test(test_simd       tests/test_simd.c)
     add_executable(compress_debug tests/test_compress_debug.c)
     target_include_directories(compress_debug PRIVATE ${UNITY_INC} include src)
     target_link_libraries(compress_debug PRIVATE netc)

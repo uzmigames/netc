@@ -179,9 +179,9 @@ netc_result_t netc_compress(
         src_size >= NETC_DELTA_MIN_SIZE &&
         ctx->arena_size >= src_size)
     {
-        /* Encode residuals into arena */
-        netc_delta_encode(ctx->prev_pkt, (const uint8_t *)src,
-                          ctx->arena, src_size);
+        /* Encode residuals into arena via SIMD dispatch */
+        ctx->simd_ops.delta_encode(ctx->prev_pkt, (const uint8_t *)src,
+                                   ctx->arena, src_size);
         compress_src = ctx->arena;
         pkt_flags   |= NETC_PKT_FLAG_DELTA;
         did_delta    = 1;
