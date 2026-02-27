@@ -414,3 +414,79 @@ MIT — see [LICENSE](LICENSE).
 ---
 
 *Inspired by [Oodle Network](https://www.radgametools.com/oodlenetwork.htm) (RAD Game Tools). netc is an independent open-source implementation with no affiliation to RAD Game Tools.*
+
+---
+
+## 📖 Technical References
+
+References used in the design and implementation of netc, organized by subsystem.
+
+### Asymmetric Numeral Systems (ANS / tANS / FSE)
+
+| Reference | Used for |
+|-----------|----------|
+| Jarek Duda, *[Asymmetric numeral systems: entropy coding combining speed of Huffman coding with compression rate of arithmetic coding](https://arxiv.org/abs/1311.2540)*, arXiv:1311.2540, 2013 | Original ANS theory, state machine formulation, tANS encode/decode algorithm |
+| Yann Collet, *[FSE — Finite State Entropy](https://github.com/Cyan4973/FiniteStateEntropy)* (GitHub, 2013–present) | FSE spread function (coprime step), encode/decode table construction, practical implementation reference |
+| Yann Collet et al., *[Zstandard compression format specification](https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md)* (RFC 8878) | FSE bitstream format, sentinel-based bitstream alignment, table normalization rules |
+| Yann Collet, *[Understanding Finite State Entropy](https://fastcompression.blogspot.com/2013/12/finite-state-entropy-new-breed-of.html)*, FastCompression blog, 2013 | Intuition for spread function, state range [TABLE\_SIZE, 2×TABLE\_SIZE), flush normalization |
+| Charles Bloom, *[ANS notes](http://cbloomrants.blogspot.com/2014/01/01-10-14-understanding-ans-1.html)*, cbloomrants blog, 2014 | Encoder normalization, bit-flush precision analysis |
+
+**Key implementation decisions informed by these references:**
+
+- **Spread step** = `(TABLE_SIZE >> 1) + (TABLE_SIZE >> 3) + 3` = 2563 for TABLE\_SIZE = 4096.
+  GCD(2563, 4096) = 1 (2563 is odd) → all 4096 slots visited exactly once, single globally-traversable chain. Source: Zstd FSE spread function.
+- **Sentinel bitstream flush**: Writer appends a 1-bit sentinel after data; reader locates highest set bit in the last byte to find the exact starting offset. Matches Zstd `BIT_initDStream` pattern.
+- **Decode entry size = 4 bytes**: `{symbol:u8, nb_bits:u8, next_state_base:u16}` — 4096 entries × 4 bytes = 16 KB, fits in L1 cache on all modern CPUs. Source: AD-001.
+
+### CRC32
+
+| Reference | Used for |
+|-----------|----------|
+| IEEE 802.3 (Ethernet) CRC specification | Polynomial 0xEDB88320 (reflected form of 0x04C11DB7) |
+| Gary S. Brown, *A Painless Guide to CRC Error Detection Algorithms* (1993) | Table-based 256-entry precomputed table, `crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF]` |
+| IETF RFC 3720 §B.4 — iSCSI CRC32C | Reference test vector: CRC32(\"123456789\") = 0xCBF43926 |
+
+### Dictionary Training & Probability Normalization
+
+| Reference | Used for |
+|-----------|----------|
+| Zstandard source: [`zstd/lib/compress/zstd_compress.c`](https://github.com/facebook/zstd/blob/dev/lib/compress/zstd_compress.c) | Frequency counting, normalization to power-of-2 total with min-count = 1 |
+| Oodle Network SDK documentation (RAD Game Tools) | Per-context-bucket probability tables (header / body / tail buckets), offline training workflow |
+| RFC-001 §6.2 (this project) | Context bucket boundaries: HEADER [0–15], SUBHEADER [16–63], BODY [64–255], TAIL [256+] |
+
+### Bitstream I/O
+
+| Reference | Used for |
+|-----------|----------|
+| Zstandard source: [`zstd/lib/common/bitstream.h`](https://github.com/facebook/zstd/blob/dev/lib/common/bitstream.h) | MSB-first backward reader design, sentinel-based stream alignment, accumulator refill strategy |
+| Yann Collet, *[LZ4 bitstream](https://github.com/lz4/lz4)* | LSB-first writer (accumulator packs bits from LSB, flushes full bytes forward) |
+
+**Writer convention**: LSB-first, 64-bit accumulator, forward buffer.
+**Reader convention**: MSB-first accumulator, backward byte traversal, sentinel skip on init.
+
+### Performance & SIMD
+
+| Reference | Used for |
+|-----------|----------|
+| Agner Fog, *[Optimizing software in C++](https://agner.org/optimize/)* and *[Instruction Tables](https://agner.org/optimize/)* | Branch-free decode loop design, throughput vs. latency tradeoffs for table lookups |
+| Intel Intrinsics Guide — [software.intel.com/sites/landingpage/IntrinsicsGuide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html) | SSE4.2 / AVX2 intrinsics for SIMD acceleration (planned Phase 4) |
+| ARM, *[ARM NEON Intrinsics Reference](https://developer.arm.com/architectures/instruction-sets/intrinsics/)* | NEON intrinsics for Apple Silicon / ARM64 (planned Phase 4) |
+
+### Comparative Compressors (benchmark baselines)
+
+| Library | Reference |
+|---------|-----------|
+| LZ4 | [https://github.com/lz4/lz4](https://github.com/lz4/lz4) — Yann Collet |
+| Zstandard | [https://github.com/facebook/zstd](https://github.com/facebook/zstd) — Facebook / Yann Collet |
+| zlib | [https://zlib.net](https://zlib.net) — Jean-loup Gailly & Mark Adler |
+| Snappy | [https://github.com/google/snappy](https://github.com/google/snappy) — Google |
+| Oodle Network | [https://www.radgametools.com/oodlenetwork.htm](https://www.radgametools.com/oodlenetwork.htm) — RAD Game Tools (proprietary, benchmark target only) |
+
+### Standards & RFCs
+
+| Standard | Relevance |
+|----------|-----------|
+| RFC 8878 — Zstandard Compression | FSE/ANS bitstream format specification |
+| IEEE 802.3 Ethernet | CRC32 polynomial and algorithm |
+| IETF RFC 3720 §B.4 | CRC32 test vector |
+| ITU-T X.690 (BER/DER) | Inspiration for packet header TLV encoding (RFC-001) |
