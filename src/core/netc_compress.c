@@ -2,7 +2,11 @@
  * netc_compress.c — Compression entry point.
  *
  * Phase 2: tANS compression with passthrough fallback (AD-006).
+ * Phase 3: Field-class-aware delta pre-pass (AD-002).
+ *
  *   - Validates all arguments.
+ *   - If NETC_CFG_FLAG_DELTA is set and a prior packet exists, applies delta
+ *     encoding (field-class aware, AD-002) before tANS.
  *   - If a dictionary with valid tANS tables is present, attempts tANS encoding
  *     per context bucket (RFC-001 §6.2).
  *   - Falls back to passthrough if compressed_size >= original_size (AD-006).
@@ -12,6 +16,9 @@
  *   [header  8 bytes ]
  *   [initial_state 4 bytes  LE — encoder final state for decoder init]
  *   [bitstream payload — variable length]
+ *
+ * Delta is indicated by NETC_PKT_FLAG_DELTA in the header flags field.
+ * The decompressor applies the inverse pass after decoding.
  */
 
 #include "netc_internal.h"
@@ -151,26 +158,61 @@ netc_result_t netc_compress(
     uint8_t seq  = ctx->context_seq++;
     const netc_dict_t *dict = ctx->dict;
 
+    /* -----------------------------------------------------------------------
+     * Phase 3: Delta pre-pass (AD-002, field-class-aware)
+     *
+     * Conditions for delta:
+     *   - NETC_CFG_FLAG_DELTA is set in context flags
+     *   - A previous packet exists (prev_pkt_size > 0) with matching size
+     *   - Current packet is large enough to benefit (>= NETC_DELTA_MIN_SIZE)
+     *
+     * We write delta residuals into the arena, then compress the residuals.
+     * If the previous packet size differs, we fall back to no-delta for this
+     * packet (size mismatch makes prediction less useful anyway).
+     * ----------------------------------------------------------------------- */
+    const uint8_t *compress_src = (const uint8_t *)src;
+    uint8_t        pkt_flags    = NETC_PKT_FLAG_DICT_ID;
+    int            did_delta    = 0;
+
+    if ((ctx->flags & NETC_CFG_FLAG_DELTA) &&
+        ctx->prev_pkt_size == src_size &&
+        src_size >= NETC_DELTA_MIN_SIZE &&
+        ctx->arena_size >= src_size)
+    {
+        /* Encode residuals into arena */
+        netc_delta_encode(ctx->prev_pkt, (const uint8_t *)src,
+                          ctx->arena, src_size);
+        compress_src = ctx->arena;
+        pkt_flags   |= NETC_PKT_FLAG_DELTA;
+        did_delta    = 1;
+    }
+
     /* Attempt tANS if we have a valid dictionary */
     if (dict != NULL && src_size > 0) {
         size_t payload_cap = dst_cap - NETC_HEADER_SIZE;
         uint8_t *payload   = (uint8_t *)dst + NETC_HEADER_SIZE;
         size_t  compressed_payload = 0;
 
-        if (try_tans_compress(dict, (const uint8_t *)src, src_size,
+        if (try_tans_compress(dict, compress_src, src_size,
                               payload, payload_cap, &compressed_payload) == 0) {
             /* Only use tANS if it actually compressed (AD-006) */
             if (compressed_payload < src_size) {
                 netc_pkt_header_t hdr;
                 hdr.original_size   = (uint16_t)src_size;
                 hdr.compressed_size = (uint16_t)compressed_payload;
-                hdr.flags           = NETC_PKT_FLAG_DICT_ID;
+                hdr.flags           = pkt_flags;
                 hdr.algorithm       = NETC_ALG_TANS;
                 hdr.model_id        = dict->model_id;
                 hdr.context_seq     = seq;
 
                 netc_hdr_write(dst, &hdr);
                 *dst_size = NETC_HEADER_SIZE + compressed_payload;
+
+                /* Update delta predictor with the original (not residual) bytes */
+                if (ctx->prev_pkt != NULL) {
+                    memcpy(ctx->prev_pkt, src, src_size);
+                    ctx->prev_pkt_size = src_size;
+                }
 
                 if (ctx->flags & NETC_CFG_FLAG_STATS) {
                     ctx->stats.packets_compressed++;
@@ -182,7 +224,15 @@ netc_result_t netc_compress(
         }
     }
 
-    /* Fall back to passthrough */
+    /* If we ran delta but tANS failed/didn't compress, we still need to
+     * update prev_pkt for the next packet's predictor. */
+    (void)did_delta;
+    if (ctx->prev_pkt != NULL) {
+        memcpy(ctx->prev_pkt, src, src_size);
+        ctx->prev_pkt_size = src_size;
+    }
+
+    /* Fall back to passthrough (no delta flag — raw bytes in payload) */
     return emit_passthrough(ctx, dict, src, src_size, dst, dst_cap, dst_size, seq);
 }
 

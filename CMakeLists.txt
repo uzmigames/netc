@@ -96,7 +96,6 @@ set(NETC_CORE_SOURCES
 )
 
 # Phase 3+ sources (added as they are implemented):
-# src/algo/netc_delta.c
 # src/simd/netc_simd_generic.c
 # src/simd/netc_simd_sse42.c
 # src/simd/netc_simd_avx2.c
@@ -159,6 +158,7 @@ if(NETC_BUILD_TESTS)
     add_netc_test(test_dict       tests/test_dict.c)
     add_netc_test(test_compress   tests/test_compress.c)
     add_netc_test(test_tans_debug tests/test_tans_debug.c)
+    add_netc_test(test_delta      tests/test_delta.c)
     add_executable(compress_debug tests/test_compress_debug.c)
     target_include_directories(compress_debug PRIVATE ${UNITY_INC} include src)
     target_link_libraries(compress_debug PRIVATE netc)

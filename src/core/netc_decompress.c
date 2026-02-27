@@ -2,10 +2,14 @@
  * netc_decompress.c — Decompression entry point.
  *
  * Phase 2: Routes NETC_ALG_TANS packets to the tANS decoder.
+ * Phase 3: Applies delta post-pass when NETC_PKT_FLAG_DELTA is set (AD-002).
+ *
  *   - Reads and validates the 8-byte packet header.
  *   - Validates all security constraints (RFC-001 §15.1).
  *   - NETC_ALG_PASSTHRU: copies payload verbatim.
  *   - NETC_ALG_TANS: reads initial_state (4 bytes LE) then decodes bitstream.
+ *   - If NETC_PKT_FLAG_DELTA is set: applies delta post-pass to reconstruct
+ *     the original bytes from residuals + previous packet predictor.
  */
 
 #include "netc_internal.h"
@@ -133,6 +137,12 @@ netc_result_t netc_decompress(
             memcpy(dst, payload, hdr.original_size);
             *dst_size = hdr.original_size;
 
+            /* Update delta predictor with this packet's original bytes */
+            if (ctx->prev_pkt != NULL) {
+                memcpy(ctx->prev_pkt, dst, hdr.original_size);
+                ctx->prev_pkt_size = hdr.original_size;
+            }
+
             if (ctx->flags & NETC_CFG_FLAG_STATS) {
                 ctx->stats.packets_decompressed++;
                 ctx->stats.bytes_in  += src_size;
@@ -147,6 +157,22 @@ netc_result_t netc_decompress(
             r = decode_tans(ctx->dict, &hdr, payload,
                             hdr.compressed_size, dst, dst_size);
             if (r != NETC_OK) return r;
+
+            /* Phase 3: Delta post-pass — undo delta encoding if flag is set */
+            if ((hdr.flags & NETC_PKT_FLAG_DELTA) &&
+                ctx->prev_pkt != NULL &&
+                ctx->prev_pkt_size == *dst_size)
+            {
+                /* dst currently holds residuals; reconstruct original in-place */
+                netc_delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
+                                  (uint8_t *)dst, *dst_size);
+            }
+
+            /* Update delta predictor with reconstructed original bytes */
+            if (ctx->prev_pkt != NULL) {
+                memcpy(ctx->prev_pkt, dst, *dst_size);
+                ctx->prev_pkt_size = *dst_size;
+            }
 
             if (ctx->flags & NETC_CFG_FLAG_STATS) {
                 ctx->stats.packets_decompressed++;

@@ -64,6 +64,18 @@ netc_ctx_t *netc_ctx_create(const netc_dict_t *dict, const netc_cfg_t *cfg) {
         return NULL;
     }
 
+    /* Allocate previous-packet buffer for delta prediction (stateful only) */
+    if (cfg->flags & NETC_CFG_FLAG_STATEFUL) {
+        ctx->prev_pkt = (uint8_t *)calloc(1, NETC_MAX_PACKET_SIZE);
+        if (NETC_UNLIKELY(ctx->prev_pkt == NULL)) {
+            free(ctx->arena);
+            free(ctx->ring);
+            free(ctx);
+            return NULL;
+        }
+    }
+    ctx->prev_pkt_size = 0;
+
     memset(&ctx->stats, 0, sizeof(ctx->stats));
     return ctx;
 }
@@ -76,6 +88,7 @@ void netc_ctx_destroy(netc_ctx_t *ctx) {
     if (ctx == NULL) {
         return;
     }
+    free(ctx->prev_pkt);
     free(ctx->ring);
     free(ctx->arena);
     /* dict is shared and not owned by the context */
@@ -94,6 +107,10 @@ void netc_ctx_reset(netc_ctx_t *ctx) {
         memset(ctx->ring, 0, ctx->ring_size);
         ctx->ring_pos = 0;
     }
+    if (ctx->prev_pkt != NULL) {
+        memset(ctx->prev_pkt, 0, NETC_MAX_PACKET_SIZE);
+    }
+    ctx->prev_pkt_size = 0;
     ctx->context_seq = 0;
     memset(&ctx->stats, 0, sizeof(ctx->stats));
 }

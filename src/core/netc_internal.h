@@ -10,6 +10,7 @@
 #include "../../include/netc.h"
 #include "../util/netc_platform.h"
 #include "../algo/netc_tans.h"
+#include "../algo/netc_delta.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -64,6 +65,10 @@ struct netc_ctx {
     uint8_t           *ring;          /* Ring buffer for history (NULL in stateless) */
     uint32_t           ring_size;     /* Allocated ring buffer size */
     uint32_t           ring_pos;      /* Current write position (wraps) */
+
+    /* --- Delta prediction state (stateful mode) --- */
+    uint8_t           *prev_pkt;      /* Copy of last packet before delta (for encoder/decoder symmetry) */
+    size_t             prev_pkt_size; /* Size of bytes valid in prev_pkt (0 = no prior packet) */
 
     /* --- Sequence counter for stateless delta --- */
     uint8_t            context_seq;   /* Rolling 8-bit counter (RFC-001 §9.1) */
