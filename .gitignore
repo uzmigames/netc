@@ -74,6 +74,10 @@ tests/output/
 *.test
 *.test.exe
 
+# Temporary debug files (should live in tests/, never in root)
+debug_*.c
+debug_*.h
+
 # Fuzzer artifacts
 fuzz/corpus/
 fuzz/crashes/
