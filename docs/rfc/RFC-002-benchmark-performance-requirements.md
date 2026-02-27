@@ -14,7 +14,7 @@ Depends:   RFC-001
 
 This document defines the performance targets, benchmark methodology, and comparative test suite for the netc library. It establishes pass/fail criteria against reference compressors (zlib, LZ4, Zstd, static Huffman) and against **OodleNetwork 2.9.13** (RAD Game Tools) — the production-grade closed-source network compression library used in Unreal Engine 5.
 
-OodleNetwork is the **primary aspirational target**: netc aims to match or exceed OodleNetwork's compression ratio and throughput on network packet workloads. All other open-source compressors are secondary baselines.
+OodleNetwork is the **definition of done**: netc is considered functionally complete only when it matches or exceeds OodleNetwork's compression ratio and throughput on network packet workloads. All other open-source compressors (zlib, LZ4, Zstd) are intermediate milestones. If reaching Oodle parity requires changing the planned algorithm strategy, the strategy changes — the target does not.
 
 ---
 
@@ -64,17 +64,22 @@ OodleNetwork is the **primary aspirational target**: netc aims to match or excee
 
 netc MUST outperform zlib, LZ4, Zstd, and Snappy on the structured game packet workload (WL-001) on throughput (MB/s). For each open-source compressor, netc MUST win on at least one of: throughput, latency, or compression ratio.
 
-#### Against OodleNetwork (primary aspirational target)
+#### Against OodleNetwork (definition of done — non-negotiable)
 
-OodleNetwork 2.9.13 (`oo2net_win64`) is the commercial reference. It represents the state-of-the-art for UDP/TCP game packet compression. netc targets:
+OodleNetwork 2.9.13 (`oo2net_win64`) is the commercial reference and the **completion threshold**. netc is not functionally complete until it meets all three parity criteria simultaneously across WL-001 through WL-005:
 
-| Metric | v0.1 Goal | v0.2 Goal |
-|--------|-----------|-----------|
-| Compression ratio (WL-001) | ≤ Oodle ratio + 0.05 (within 5%) | ≤ Oodle ratio |
-| Compress throughput (WL-001) | ≥ Oodle throughput × 0.80 | ≥ Oodle throughput |
-| Decompress throughput (WL-001) | ≥ Oodle throughput × 0.80 | ≥ Oodle throughput |
+| Metric | Required for release |
+|--------|---------------------|
+| Compression ratio | ≤ Oodle ratio (same workload, same corpus size) |
+| Compress throughput | ≥ Oodle throughput |
+| Decompress throughput | ≥ Oodle throughput |
 
-These are aspirational — if netc cannot match OodleNetwork, the gap MUST be measured and documented. The benchmark report MUST include a dedicated "vs. OodleNetwork" section in every release.
+These are **hard requirements**, not aspirational targets. If benchmark results show netc below parity:
+1. The release is blocked.
+2. The algorithm strategy is reviewed and adjusted (see PRD §8.1).
+3. Implementation restarts from the bottleneck identified by the benchmark gap analysis.
+
+The benchmark report MUST include a dedicated "vs. OodleNetwork" section showing the exact delta (positive or negative) for every workload.
 
 ---
 
@@ -400,17 +405,19 @@ For the structured game packet workload (WL-001):
 
 **OodleNetwork gates (developer machine, Windows, `NETC_BENCH_WITH_OODLE=ON`):**
 
-| Gate | Criterion | v0.1 | v0.2 |
-|------|-----------|------|------|
-| OODLE-01 | netc compress ratio ≤ Oodle ratio + 0.05 | Required | Required |
-| OODLE-02 | netc compress ratio ≤ Oodle ratio | Warning | Required |
-| OODLE-03 | netc compress throughput ≥ Oodle throughput × 0.80 | Required | Required |
-| OODLE-04 | netc compress throughput ≥ Oodle throughput | Warning | Required |
-| OODLE-05 | netc decompress throughput ≥ Oodle throughput × 0.80 | Required | Required |
-| OODLE-06 | netc decompress throughput ≥ Oodle throughput | Warning | Required |
-| OODLE-07 | Gap report published in release notes if any OODLE gate fails | Always | Always |
+| Gate | Criterion | Status |
+|------|-----------|--------|
+| OODLE-01 | netc compress ratio ≤ Oodle ratio (WL-001..005) | **BLOCKS RELEASE** |
+| OODLE-02 | netc compress throughput ≥ Oodle throughput (WL-001..005) | **BLOCKS RELEASE** |
+| OODLE-03 | netc decompress throughput ≥ Oodle throughput (WL-001..005) | **BLOCKS RELEASE** |
+| OODLE-04 | Gap report section present in release notes | **BLOCKS RELEASE** |
+| OODLE-05 | If any OODLE gate fails: algorithm escalation protocol initiated (PRD §8.1) | Mandatory process |
 
-Oodle gates are **not** required to pass in CI (OodleNetwork is proprietary and cannot be distributed). They are enforced on local developer machines with UE5.6 installed and reported in release documentation.
+**All three parity gates (OODLE-01, OODLE-02, OODLE-03) must pass on ALL workloads WL-001 through WL-005 before any v1.0 release.**
+
+These gates are not enforced in automated CI because OodleNetwork is proprietary and cannot be redistributed. They MUST be run manually on a developer machine with UE5.6 installed before any release tag is created. The benchmark output log MUST be attached to the release as a required artifact.
+
+If Oodle parity cannot be reached with the current implementation, the release is withheld and the algorithm strategy is revised per PRD §8.1 until parity is achieved.
 
 ---
 

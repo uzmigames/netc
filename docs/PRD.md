@@ -10,7 +10,9 @@ Status:   APPROVED FOR DEVELOPMENT
 
 ## 1. Executive Summary
 
-**netc** is an open-source C library for compressing low-entropy binary network packets at wire speed. It targets high-frequency network scenarios (game servers, financial systems, telemetry) where millions of small packets per second must be compressed with sub-microsecond latency. netc is inspired by RAD Game Tools' Oodle Network and improves upon general-purpose compressors (zlib, LZ4, Zstd) for structured protocol data.
+**netc** is an open-source C library for compressing low-entropy binary network packets at wire speed. It targets high-frequency network scenarios (game servers, financial systems, telemetry) where millions of small packets per second must be compressed with sub-microsecond latency.
+
+**Definition of Done**: netc is considered functionally complete only when its benchmark results — compression ratio and throughput — are at parity with **OodleNetwork 2.9.13** (RAD Game Tools) on the standard game packet workloads. Beating open-source compressors (zlib, LZ4, Zstd) is a necessary intermediate milestone, not the finish line. If reaching Oodle parity requires changing the planned implementation strategy, the strategy changes. The target does not.
 
 ---
 
@@ -35,8 +37,11 @@ There is no open-source, production-quality C library that:
 1. Achieves > 2 GB/s compression throughput on structured packets
 2. Trains a dictionary from representative traffic
 3. Exploits inter-packet correlation (delta encoding)
-4. Works correctly for both TCP (stateful) and UDP (stateless) scenarios
+4. Works correctly for both stateful (ordered stream) and stateless (independent datagram) scenarios
 5. Provides comprehensive benchmarks against competing algorithms
+6. **Matches OodleNetwork's compression ratio and throughput** — the only existing library that does this is proprietary and requires a commercial license
+
+The absence of an open-source Oodle-grade alternative is the core problem netc solves.
 
 ---
 
@@ -44,16 +49,20 @@ There is no open-source, production-quality C library that:
 
 ### 3.1 Primary Goals (P0)
 
+> **The project is NOT considered complete until G-OOD is achieved.**
+> All other goals are milestones on the path to G-OOD.
+
 | ID | Goal |
 |----|------|
-| G-01 | Compress structured binary packets at ≥ 2 GB/s (single core) |
-| G-02 | Decompress at ≥ 4 GB/s (single core) |
+| **G-OOD** | **Benchmark parity with OodleNetwork 2.9.13: compression ratio ≤ Oodle ratio AND throughput ≥ Oodle throughput on WL-001 through WL-005. This is the definition of functional completion.** |
+| G-01 | Compress structured binary packets at ≥ 2 GB/s (single core) — intermediate milestone |
+| G-02 | Decompress at ≥ 4 GB/s (single core) — intermediate milestone |
 | G-03 | Per-packet compression latency p99 ≤ 1 µs |
 | G-04 | Achieve ≤ 0.55× compression ratio on game state packets with trained dictionary |
 | G-05 | Zero dynamic allocation in hot path |
 | G-06 | Correct round-trip for all valid inputs (100% fidelity) |
 | G-07 | NEVER expand payload size (automatic passthrough for incompressible data) |
-| G-08 | Comparative benchmark harness vs. zlib, LZ4, Zstd, Huffman |
+| G-08 | Comparative benchmark harness vs. zlib, LZ4, Zstd, Huffman, **and OodleNetwork** |
 | G-09 | Clean C11 API, no dependencies beyond libc |
 | G-10 | 95%+ test coverage |
 
@@ -235,14 +244,25 @@ Deliverables:
 
 ## 7. Success Metrics
 
-| Metric | Baseline (today) | Target |
-|--------|-----------------|--------|
-| Compression throughput | N/A | ≥ 2 GB/s |
-| vs. LZ4 throughput | N/A | > LZ4 |
-| vs. zlib throughput | N/A | > zlib (×5 minimum) |
-| Compression ratio (game packets) | N/A | ≤ 0.55 |
-| Test coverage | 0% | ≥ 95% |
-| CI benchmark gates passing | 0/11 | 11/11 |
+The project is **functionally complete** when all of the following are true simultaneously:
+
+| Metric | Required for completion | Notes |
+|--------|------------------------|-------|
+| **Compression ratio vs. OodleNetwork (WL-001..005)** | **≤ Oodle ratio** | **Primary completion criterion** |
+| **Compress throughput vs. OodleNetwork (WL-001..005)** | **≥ Oodle throughput** | **Primary completion criterion** |
+| **Decompress throughput vs. OodleNetwork (WL-001..005)** | **≥ Oodle throughput** | **Primary completion criterion** |
+| Compression throughput (absolute) | ≥ 2 GB/s | Floor; Oodle target will be higher |
+| Decompression throughput (absolute) | ≥ 4 GB/s | Floor; Oodle target will be higher |
+| vs. LZ4 throughput | > LZ4 | Intermediate milestone |
+| vs. zlib throughput | > zlib | Intermediate milestone |
+| vs. Zstd throughput | > Zstd | Intermediate milestone |
+| Compression ratio (game packets) | ≤ 0.55 | Floor; Oodle ratio will be lower |
+| Latency p99 (128B packet) | ≤ 1 µs | Hard requirement |
+| Test coverage | ≥ 95% | Hard requirement |
+| CI benchmark gates passing | 11/11 (open-source) | Hard requirement |
+| Oodle benchmark gates passing | 3/3 (OODLE-01,03,05) | **Hard requirement for completion** |
+
+**If Oodle parity cannot be achieved with the initially planned algorithm, the algorithm strategy MUST be revised.** The implementation plan is a means to the target — not the target itself.
 
 ---
 
@@ -250,11 +270,25 @@ Deliverables:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| ANS codec complexity higher than expected | Medium | High | Reference implementations exist (Zstd source) |
-| SIMD gains smaller than expected | Low | Medium | Generic path still meets targets without SIMD |
-| Dictionary training insufficient ratio | Medium | High | Implement bigram context model in Phase 3 |
-| Benchmark comparison unfair | Low | High | Document exact compiler flags and configurations |
+| **tANS alone cannot match Oodle ratio** | Medium | **Critical** | **Escalation path: evaluate rANS, higher-order context models, or hybrid Huffman+ANS. Algorithm strategy changes, Oodle target does not.** |
+| **SIMD insufficient to close throughput gap vs. Oodle** | Medium | **Critical** | **Escalation path: investigate Oodle's encoding strategy via reverse-benchmark (what htbits setting, what training size achieves its ratio?), then match approach.** |
+| **Dictionary training quality below Oodle** | High | **Critical** | **Oodle uses SelectDictionary optimization (trial-based). netc must implement equivalent corpus selection, not just frequency tables.** |
+| ANS codec implementation complexity | Medium | High | Reference implementations exist (Zstd/FSE source) |
+| SIMD gains smaller than expected | Low | Medium | Generic path still viable as fallback, but Oodle parity likely requires SIMD |
+| Benchmark comparison unfair | Low | High | Document exact compiler flags, htbits, corpus sizes for both netc and Oodle |
 | Passthrough edge cases missed | Low | High | Extensive fuzz testing in Phase 6 |
+
+### 8.1 Algorithm Escalation Protocol
+
+If at any benchmark checkpoint netc fails to meet the Oodle parity targets (G-OOD), the following escalation process applies — in order:
+
+1. **Profile the gap**: Run `--with-oodle` benchmark, identify whether the gap is ratio, compress throughput, or decompress throughput.
+2. **Ratio gap**: Increase context model fidelity (more buckets, higher-order bigram, corpus-based bucket tuning). Evaluate rANS if tANS table resolution is the bottleneck.
+3. **Compress throughput gap**: Profile hot path with perf/VTune. Increase SIMD coverage. Evaluate encode parallelism.
+4. **Decompress throughput gap**: Verify tANS table fits in L1. Reduce branch count in decode loop. Evaluate prefetch hints.
+5. **All else fails**: Study OodleNetwork1_SelectDictionaryFromPackets_Trials approach — Oodle's dictionary quality advantage is likely the root cause of ratio gaps.
+
+No release ships until G-OOD is met.
 
 ---
 
