@@ -25,22 +25,8 @@ extern "C" {
 #endif
 
 /* =========================================================================
- * Public API
- * ========================================================================= */
-
-/** Initialize the timer subsystem (calibrates TSC frequency if needed).
- *  Must be called once before bench_now_ns(). */
-void bench_timer_init(void);
-
-/** Return current time in nanoseconds (monotonic, relative to some epoch).
- *  The epoch is arbitrary — only differences are meaningful. */
-uint64_t bench_now_ns(void);
-
-/** Return TSC frequency in GHz (x86 only; 0 on other platforms). */
-double bench_tsc_ghz(void);
-
-/* =========================================================================
- * Platform implementation (inline where possible for low overhead)
+ * Platform implementation — all functions are static inline.
+ * Include this header in every .c that needs timing; no .c file required.
  * ========================================================================= */
 
 #if defined(_WIN32)

@@ -179,8 +179,7 @@ endif()
 # Benchmark harness (Phase 5)
 # =============================================================================
 if(NETC_BUILD_BENCH)
-    # Placeholder — bench_main.c will be added in Phase 5
-    # add_subdirectory(bench)
+    add_subdirectory(bench)
 endif()
 
 # =============================================================================
