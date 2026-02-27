@@ -1,0 +1,36 @@
+## 1. P/Invoke Layer
+- [ ] 1.1 Write NetcNative.cs (DllImport for all public netc functions, CallingConvention.Cdecl)
+- [ ] 1.2 Implement platform-conditional DLL loading (Win64 .dll, Linux .so, macOS .dylib, Android .so, iOS static)
+- [ ] 1.3 Write unit tests for P/Invoke declarations (xUnit, dotnet test)
+
+## 2. Core C# Wrappers
+- [ ] 2.1 Implement NetcDict (IDisposable, LoadFromBytes(ReadOnlySpan<byte>), LoadFromFile, Train)
+- [ ] 2.2 Implement NetcContext (IDisposable, TCP/UDP mode, Compress/Decompress Span<byte> API)
+- [ ] 2.3 Implement NetcTrainer (Train from IEnumerable<ReadOnlyMemory<byte>>, SaveToBytes)
+- [ ] 2.4 Implement NetcException (maps netc_result_t error codes to typed exceptions)
+- [ ] 2.5 Write unit tests: round-trip all workloads (WL-001..WL-008 equivalent), thread safety
+
+## 3. Unity Adapter
+- [ ] 3.1 Implement NetcMirrorTransport (extends Mirror Transport, wraps NetcContext per connection)
+- [ ] 3.2 Implement NetcFishNetTransport (extends FishNet Transport)
+- [ ] 3.3 Implement NetcNGOTransport (extends Unity Netcode for GameObjects INetworkStreamDriverConstructor)
+- [ ] 3.4 Write Unity PlayMode tests for each transport adapter (compress/decompress round-trip)
+- [ ] 3.5 Write Unity package.json and asmdef files for UPM distribution
+
+## 4. Godot 4 Adapter
+- [ ] 4.1 Implement NetcMultiplayerPeer (extends MultiplayerPeerExtension via GDExtension C# binding)
+- [ ] 4.2 Wrap ENetMultiplayerPeer with transparent netc compression/decompression
+- [ ] 4.3 Write GDScript test scene: server + client, verify packets arrive correctly compressed
+- [ ] 4.4 Write Godot export configuration for all target platforms
+
+## 5. Native Binary Packaging
+- [ ] 5.1 CMake cross-compile targets: Win64, Linux x86_64, macOS ARM64
+- [ ] 5.2 Android NDK build: arm64-v8a (with NEON), x86_64
+- [ ] 5.3 iOS static library: arm64
+- [ ] 5.4 CI: build all native binaries and publish to GitHub Releases as artifacts
+- [ ] 5.5 Write NuGet .csproj package descriptor with native binary bundling per RID
+
+## 6. Documentation
+- [ ] 6.1 Write docs/sdk-csharp.md (P/Invoke internals, Unity quick start, Godot quick start)
+- [ ] 6.2 Write sdk/csharp/README.md (NuGet install, UPM install, Godot asset library)
+- [ ] 6.3 Update root README.md SDK section with final verified code examples

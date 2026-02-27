@@ -12,7 +12,9 @@ Depends:   RFC-001
 
 ## Abstract
 
-This document defines the performance targets, benchmark methodology, and comparative test suite for the netc library. It establishes pass/fail criteria against reference compressors (zlib, LZ4, Zstd, static Huffman) across realistic network packet workloads.
+This document defines the performance targets, benchmark methodology, and comparative test suite for the netc library. It establishes pass/fail criteria against reference compressors (zlib, LZ4, Zstd, static Huffman) and against **OodleNetwork 2.9.13** (RAD Game Tools) — the production-grade closed-source network compression library used in Unreal Engine 5.
+
+OodleNetwork is the **primary aspirational target**: netc aims to match or exceed OodleNetwork's compression ratio and throughput on network packet workloads. All other open-source compressors are secondary baselines.
 
 ---
 
@@ -56,14 +58,23 @@ This document defines the performance targets, benchmark methodology, and compar
 | Compression ratio (UDP game) | ≤ 0.45 |
 | Packets per second (decompress) | ≥ 20 Mpps |
 
-### 1.3 Comparison Targets (MUST beat)
+### 1.3 Comparison Targets
 
-netc MUST outperform all reference compressors on at least ONE of:
-- Throughput (MB/s), OR
-- Latency (ns/packet), OR
-- Compression ratio
+#### Against open-source baselines (MUST beat all)
 
-For the structured game packet workload, netc MUST beat ALL reference compressors on throughput (MB/s).
+netc MUST outperform zlib, LZ4, Zstd, and Snappy on the structured game packet workload (WL-001) on throughput (MB/s). For each open-source compressor, netc MUST win on at least one of: throughput, latency, or compression ratio.
+
+#### Against OodleNetwork (primary aspirational target)
+
+OodleNetwork 2.9.13 (`oo2net_win64`) is the commercial reference. It represents the state-of-the-art for UDP/TCP game packet compression. netc targets:
+
+| Metric | v0.1 Goal | v0.2 Goal |
+|--------|-----------|-----------|
+| Compression ratio (WL-001) | ≤ Oodle ratio + 0.05 (within 5%) | ≤ Oodle ratio |
+| Compress throughput (WL-001) | ≥ Oodle throughput × 0.80 | ≥ Oodle throughput |
+| Decompress throughput (WL-001) | ≥ Oodle throughput × 0.80 | ≥ Oodle throughput |
+
+These are aspirational — if netc cannot match OodleNetwork, the gap MUST be measured and documented. The benchmark report MUST include a dedicated "vs. OodleNetwork" section in every release.
 
 ---
 
@@ -75,8 +86,17 @@ For the structured game packet workload, netc MUST beat ALL reference compressor
 Hardware:
   CPU:    x86_64, modern (post-2018), no thermal throttling
   RAM:    ≥ 16 GB DDR4, no NUMA interference
-  OS:     Linux (primary), Windows (secondary)
+  OS:     Linux (primary), Windows (secondary, required for OodleNetwork Win64 adapter)
   Cores:  Single-core measurement (no NUMA, no migration)
+
+OodleNetwork availability:
+  Platform:   Windows only (oo2net_win64.lib / oo2net_win64.dll)
+  SDK path:   W:/UE_5.6_Source/Engine/Plugins/Compression/OodleNetwork/Sdks/2.9.13/
+  Lib:        lib/Win64/oo2net_win64.lib
+  Header:     include/oodle2net.h
+  Note:       OodleNetwork benchmarks are Windows-only. CI runs Linux-only gates
+              for open-source compressors. Local developer machines with UE5.6
+              installed run the full Oodle comparison suite.
 
 Software:
   Compiler: GCC 12+ with -O3 -march=native
@@ -114,14 +134,17 @@ double ns = (double)(end_cycles - start_cycles) / tsc_freq_ghz;
 Each measurement produces:
 
 ```
-Compressor    | Workload       | p50(ns) | p99(ns) | p999(ns) | MB/s   | Ratio
-──────────────┼────────────────┼─────────┼─────────┼──────────┼────────┼──────
-netc          | game-64b       |   180   |   420   |    900   | 4800   | 0.48
-lz4           | game-64b       |   310   |   680   |   1200   | 2100   | 0.71
-zlib-1        | game-64b       |  2800   |  5200   |   9000   |  280   | 0.52
-zstd-3        | game-64b       |   950   |  1800   |   3200   |  890   | 0.44
-huffman-static| game-64b       |   220   |   450   |   800    | 3200   | 0.58
+Compressor      | Workload  | p50(ns) | p99(ns) | p999(ns) | MB/s   | Ratio | vs Oodle
+────────────────┼───────────┼─────────┼─────────┼──────────┼────────┼───────┼─────────
+oodle-udp       | game-64b  |   120   |   280   |    600   | 6200   | 0.43  | baseline
+netc            | game-64b  |   180   |   420   |    900   | 4800   | 0.48  | -23% tput
+lz4             | game-64b  |   310   |   680   |   1200   | 2100   | 0.71  | -66% tput
+zlib-1          | game-64b  |  2800   |  5200   |   9000   |  280   | 0.52  | -95% tput
+zstd-3          | game-64b  |   950   |  1800   |   3200   |  890   | 0.44  | -86% tput
+huffman-static  | game-64b  |   220   |   450   |    800   | 3200   | 0.58  | -48% tput
 ```
+
+(Numbers above are illustrative targets, not measured values.)
 
 ---
 
@@ -207,6 +230,8 @@ All benchmark results MUST include the corpus seed for reproducibility.
 
 | Compressor | Version | Configuration | Notes |
 |------------|---------|---------------|-------|
+| **OodleNetwork** | **2.9.13** | **UDP: OodleNetwork1UDP_Encode/Decode** | **Primary target. Win64 only.** |
+| **OodleNetwork** | **2.9.13** | **TCP: OodleNetwork1TCP_Encode/Decode** | **Stateful mode comparison.** |
 | zlib | 1.3.x | level=1 (fastest) | `deflate` stream |
 | zlib | 1.3.x | level=6 (default) | |
 | LZ4 | 1.9.x | default | `LZ4_compress_fast` |
@@ -220,13 +245,58 @@ All benchmark results MUST include the corpus seed for reproducibility.
 | netc | current | level=5 (default) | |
 | netc | current | level=9 (best) | |
 
-### 4.2 Fair Comparison Rules
+### 4.2 OodleNetwork Integration
+
+OodleNetwork is called directly via its C API. The benchmark adapter (`bench_oodle.c`) wraps:
+
+```c
+// Stateless mode (UDP equivalent) — primary comparison
+OO_SINTa OodleNetwork1UDP_Encode(
+    const OodleNetwork1UDP_State *state,
+    const OodleNetwork1_Shared   *shared,
+    const void *raw,   OO_SINTa rawLen,
+    void       *comp);
+
+OO_BOOL OodleNetwork1UDP_Decode(
+    const OodleNetwork1UDP_State *state,
+    const OodleNetwork1_Shared   *shared,
+    const void *comp,  OO_SINTa compLen,
+    void       *raw,   OO_SINTa rawLen);
+
+// Stateful mode (TCP/stream equivalent)
+OO_SINTa OodleNetwork1TCP_Encode(
+    OodleNetwork1TCP_State       *state,
+    const OodleNetwork1_Shared   *shared,
+    const void *raw,   OO_SINTa rawLen,
+    void       *comp);
+```
+
+OodleNetwork requires a **training step** before encoding. The benchmark adapter trains Oodle on the **same corpus** as netc to ensure a fair comparison:
+
+```c
+// Training (done once before benchmark loop)
+OodleNetwork1UDP_Train(udp_state, shared,
+    (const void **)corpus_ptrs, corpus_sizes, corpus_count);
+```
+
+OodleNetwork benchmark is **conditionally compiled** with `#ifdef NETC_BENCH_WITH_OODLE`. The build system detects the UE5 SDK path via the `UE5_OODLE_SDK` environment variable or CMake variable:
+
+```cmake
+# CMake: enable Oodle comparison
+cmake -DNETC_BENCH_WITH_OODLE=ON \
+      -DUE5_OODLE_SDK="W:/UE_5.6_Source/Engine/Plugins/Compression/OodleNetwork/Sdks/2.9.13" \
+      ..
+```
+
+### 4.3 Fair Comparison Rules
 
 1. All compressors tested with pre-warmed caches
-2. Dictionary-capable compressors (Zstd, netc) trained on same corpus
+2. Dictionary-capable compressors (OodleNetwork, Zstd, netc) trained on **identical corpus** with same packet count
 3. Non-dictionary compressors measured without per-packet dictionary overhead
-4. Output size comparison uses final compressed bytes only (no framing overhead)
-5. Both compression AND decompression measured separately
+4. OodleNetwork `htbits=17` (default hash table size) unless overridden by `--oodle-htbits`
+5. Output size comparison uses final compressed bytes only (no framing overhead)
+6. Both compression AND decompression measured separately
+7. OodleNetwork timing excludes the one-time training cost (training is amortized)
 
 ---
 
@@ -319,12 +389,28 @@ A netc release MUST pass all CI benchmark gates:
 
 For the structured game packet workload (WL-001):
 
-| Gate | Criterion |
-|------|-----------|
-| COMP-01 | netc throughput > LZ4 throughput | Required |
-| COMP-02 | netc throughput > zlib throughput | Required |
-| COMP-03 | netc throughput > Zstd throughput | Required |
-| COMP-04 | netc ratio ≤ LZ4 ratio OR netc throughput ≥ 1.5× LZ4 throughput | Required |
+**Open-source gates (CI-enforced, Linux):**
+
+| Gate | Criterion | Required |
+|------|-----------|----------|
+| COMP-01 | netc throughput > LZ4 throughput | Yes |
+| COMP-02 | netc throughput > zlib throughput | Yes |
+| COMP-03 | netc throughput > Zstd throughput | Yes |
+| COMP-04 | netc ratio ≤ LZ4 ratio OR netc throughput ≥ 1.5× LZ4 throughput | Yes |
+
+**OodleNetwork gates (developer machine, Windows, `NETC_BENCH_WITH_OODLE=ON`):**
+
+| Gate | Criterion | v0.1 | v0.2 |
+|------|-----------|------|------|
+| OODLE-01 | netc compress ratio ≤ Oodle ratio + 0.05 | Required | Required |
+| OODLE-02 | netc compress ratio ≤ Oodle ratio | Warning | Required |
+| OODLE-03 | netc compress throughput ≥ Oodle throughput × 0.80 | Required | Required |
+| OODLE-04 | netc compress throughput ≥ Oodle throughput | Warning | Required |
+| OODLE-05 | netc decompress throughput ≥ Oodle throughput × 0.80 | Required | Required |
+| OODLE-06 | netc decompress throughput ≥ Oodle throughput | Warning | Required |
+| OODLE-07 | Gap report published in release notes if any OODLE gate fails | Always | Always |
+
+Oodle gates are **not** required to pass in CI (OodleNetwork is proprietary and cannot be distributed). They are enforced on local developer machines with UE5.6 installed and reported in release documentation.
 
 ---
 
@@ -344,7 +430,10 @@ bench/
 │   ├── bench_zlib.c    # zlib adapter
 │   ├── bench_lz4.c     # LZ4 adapter
 │   ├── bench_zstd.c    # Zstd adapter
-│   └── bench_huffman.c # Reference Huffman adapter
+│   ├── bench_huffman.c # Reference Huffman adapter
+│   └── bench_oodle.c   # OodleNetwork adapter (compiled only if NETC_BENCH_WITH_OODLE=ON)
+├── bench_baselines/
+│   └── *.json          # Stored release baselines for regression tracking
 └── bench_results/
     └── *.csv           # Benchmark results (gitignored)
 ```
@@ -372,8 +461,17 @@ bench/
 # Set random seed
 ./bench --seed=42
 
-# Run CI gate check
+# Run CI gate check (open-source only, no Oodle)
 ./bench --ci-check  # Returns exit code 0 = pass, 1 = fail
+
+# Run full comparison including OodleNetwork (Windows + UE5.6 required)
+./bench --all --with-oodle --oodle-sdk="W:/UE_5.6_Source/Engine/Plugins/Compression/OodleNetwork/Sdks/2.9.13"
+
+# Run only the Oodle comparison gates
+./bench --oodle-gates --with-oodle
+
+# Override OodleNetwork hash table bits (default: 17)
+./bench --with-oodle --oodle-htbits=19
 ```
 
 ### 7.3 Output Format (CSV)

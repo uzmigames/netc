@@ -16,6 +16,8 @@ Inspired:  Oodle Network (RAD Game Tools)
 
 This document specifies **netc** (Network Compression), a C library designed to compress and decompress low-entropy binary payloads at wire speed for high-throughput network scenarios. netc targets millions of packets per second (Mpps) with latency budgets under 1 microsecond per packet, outperforming general-purpose compressors (zlib, LZ4, Zstd) for the specific case of structured game/simulation network packets.
 
+netc is a **buffer-to-buffer compression layer**. It operates exclusively on caller-provided memory buffers (`const void *src` → `void *dst`). It has no knowledge of sockets, transports, framing protocols, or delivery guarantees. The caller decides whether the compressed output is sent over TCP, UDP, QUIC, shared memory, a ring buffer, a custom game protocol, or written to a file — netc does not care and does not constrain that choice.
+
 ---
 
 ## Table of Contents
@@ -82,20 +84,22 @@ netc replicates this approach as an open, portable C library.
 
 ### 2.1 In Scope
 
-- Compression/decompression of individual packets (8–1500 bytes typical)
-- Dictionary training from representative packet captures
-- Shared-state compression context for TCP streams
-- Stateless per-packet compression for UDP
+- Compression/decompression of binary payloads (8–1500 bytes typical) from and to caller-provided buffers
+- Dictionary training from representative payload captures
+- **Stateful** compression context: caller accumulates inter-payload history across sequential calls (suited for ordered, reliable streams)
+- **Stateless** compression: each call is self-contained, no shared state between calls (suited for independent datagrams)
 - Benchmarking harness comparing netc vs. zlib, LZ4, Zstd, Huffman
 - C11 API with no dynamic allocation in hot path
 - SIMD acceleration (SSE4.2, AVX2, ARM NEON)
 
 ### 2.2 Out of Scope
 
-- Transport-layer implementation (TCP/UDP sockets)
+- Transport-layer implementation (sockets, connections, framing)
+- Transport protocol selection — netc output can be sent over TCP, UDP, QUIC, WebSocket, shared memory, IPC, or any other medium
 - Encryption or authentication
-- Packet framing/fragmentation
-- Reliable delivery mechanisms
+- Packet framing, fragmentation, or reassembly
+- Reliable delivery, retransmission, or ordering guarantees
+- Buffer management beyond the caller-provided src/dst buffers
 
 ---
 
@@ -103,15 +107,18 @@ netc replicates this approach as an open, portable C library.
 
 | Term | Definition |
 |------|------------|
-| **Packet** | A single binary payload to be compressed/decompressed, typically 8–1500 bytes |
-| **Context** | A compression state holding dictionary, probability tables, and ring buffer |
-| **Dictionary** | Pre-trained byte-frequency and bigram tables derived from representative packets |
+| **Payload** | A single binary buffer to be compressed/decompressed, typically 8–1500 bytes. May originate from any source (network packet, game state struct, IPC message, file chunk, etc.) |
+| **Context** | A compression state holding dictionary, probability tables, and history ring buffer. Owned and managed by the caller. |
+| **Stateful mode** | A context that accumulates history across sequential `netc_compress` calls. Useful when payloads arrive in order with no loss (e.g., a reliable stream). |
+| **Stateless mode** | Each `netc_compress_stateless` call is fully independent. No history is shared between calls. Useful for independent datagrams or when ordering/loss cannot be guaranteed. |
+| **Dictionary** | Pre-trained byte-frequency and bigram tables derived from representative payload captures |
 | **Low-entropy payload** | Binary data with predictable byte distribution (structured protocol data) |
-| **Mpps** | Millions of packets per second |
+| **Mpps** | Millions of payloads per second |
 | **NETC-LowE** | netc's primary compression algorithm (Low-Entropy optimized) |
-| **Training corpus** | A representative sample of packets used to build the dictionary |
+| **Training corpus** | A representative sample of payloads used to build the dictionary |
 | **Throughput** | Compression/decompression speed in MB/s or Mpps |
-| **Latency** | Per-packet compression or decompression time in nanoseconds |
+| **Latency** | Per-payload compression or decompression time in nanoseconds |
+| **Transport** | The mechanism used to move compressed bytes from producer to consumer. netc is transport-agnostic: TCP, UDP, QUIC, shared memory, ring buffer, or any other medium are all valid. |
 
 ---
 
@@ -135,8 +142,8 @@ netc replicates this approach as an open, portable C library.
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │                   Context Manager                        │ │
-│  │  - Per-connection state (TCP)                            │ │
-│  │  - Shared static context (UDP broadcast)                 │ │
+│  │  - Stateful mode: history accumulates across calls       │ │
+│  │  - Stateless mode: each call is self-contained           │ │
 │  │  - Memory pool (no malloc in hot path)                   │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
@@ -173,38 +180,41 @@ netc is optimized for packets with these properties:
 
 ### 5.2 Algorithm Selection
 
-NETC-LowE uses a three-stage pipeline:
+NETC-LowE uses a two-stage pipeline:
 
 ```
 Input packet
     │
     ▼
-[Stage 1: Delta Encoding]
-    │ Subtract previous packet bytes (inter-packet correlation)
-    │ or use structural prediction (header field delta)
+[Stage 1: Delta Prediction — field-class aware]
+    │ Integer counters: byte subtraction from previous packet (wrapping)
+    │ Float components / flags: XOR with previous packet byte
+    │ Fixed strings / constants: passthrough (high entropy or near-zero)
+    │ Field class inferred from training corpus (statistical, not schema-based)
     ▼
-[Stage 2: Entropy Coding — Asymmetric Numeral Systems (ANS)]
-    │ rANS (range ANS) for bulk data
-    │ tANS (table ANS) for small packets < 64 bytes
-    ▼
-[Stage 3: Huffman Post-Pass (optional)]
-    │ Applied only when ANS ratio < threshold
+[Stage 2: Entropy Coding — tANS (FSE)]
+    │ Single tANS codec for all packet sizes
+    │ 12-bit table (4096 entries × 4 bytes = 16 KB, fits in L1 cache)
+    │ Branch-free decode: one table lookup + one state transition per symbol
+    │ No division in decode loop
     ▼
 Compressed bitstream
+    │ (passthrough if compressed_size ≥ original_size — see AD-006)
 ```
 
-### 5.3 Why ANS over Huffman
+**Note on rANS**: rANS is available as an opt-in secondary path for v0.2+. It will be promoted only if the benchmark harness (RFC-002, WL-003/WL-005) shows measurable throughput gains. See AD-001 in `docs/design/algorithm-decisions.md`.
 
-| Property | Huffman | rANS |
-|----------|---------|------|
-| Optimal for symbol prob | Integer bits (suboptimal) | Fractional bits (near-optimal) |
-| Decode speed | Table lookup, ~1 ns/symbol | ~1.5 ns/symbol |
-| Compression ratio | Good | 5–15% better than Huffman |
-| Code complexity | Low | Moderate |
-| State size | None (stateless) | 64-bit state |
-| Parallelizability | Bit-serial | Interleaved streams possible |
+### 5.3 Why tANS over Huffman / rANS
 
-For packets under 64 bytes, tANS (tabular ANS) is used with pre-computed decode tables.
+| Property | Huffman | rANS | tANS (FSE) — chosen |
+|----------|---------|------|----------------------|
+| Optimal for symbol prob | Integer bits (suboptimal) | Fractional bits (near-optimal) | Fractional bits (near-optimal) |
+| Decode speed | Table lookup, ~1 ns/symbol | ~1.5 ns/symbol (division per symbol) | ~1 ns/symbol (no division) |
+| Compression ratio | Good | 5–15% better than Huffman | 5–15% better than Huffman |
+| Code complexity | Low | Moderate | Moderate |
+| Encode hot path | O(1) per symbol | Division/modulo per symbol | Table lookup per symbol |
+| Checkpoint size | Stateless | state + cursor + renorm (complex) | state + position (simple) |
+| Prior art | Widespread | Zstd rANS streams | Zstd FSE (all entropy coding) |
 
 ---
 
@@ -212,54 +222,60 @@ For packets under 64 bytes, tANS (tabular ANS) is used with pre-computed decode 
 
 ### 6.1 Delta Prediction
 
-Before entropy coding, netc applies byte-level delta prediction:
+Before entropy coding, netc applies **field-class aware** delta prediction. The delta strategy depends on the structural role of each byte, inferred statistically from the training corpus — not from an explicit schema.
 
-```
-delta[i] = packet[i] - predictor[i]
-```
+| Field class | Examples | Delta strategy |
+|-------------|----------|----------------|
+| Integer counters | sequence numbers, tick IDs, entity IDs | Byte subtraction from previous packet (wrapping) |
+| Enum / flags | message type, ability flags, bitmasks | XOR with previous packet byte |
+| Float components | position.x/y/z, velocity, rotation | XOR with previous packet byte |
+| Fixed strings / GUIDs | player ID, asset hash | Passthrough |
+| Repeated constants | protocol version, static headers | Passthrough |
 
-The predictor uses a weighted combination:
-- Previous packet at same byte offset (inter-packet delta, weight 0.7)
-- Structural prediction from header schema (weight 0.3)
+**Rationale**: Blind byte subtraction on IEEE 754 floats produces high-entropy residuals because the exponent bits cancel poorly. XOR preserves mantissa delta patterns which have lower entropy. See AD-002 in `docs/design/algorithm-decisions.md`.
 
-The delta residuals have significantly lower entropy than raw bytes, improving compression ratio by 20–40% for structured protocol data.
+Delta can be disabled per-packet (flag `NETC_PKT_FLAG_DELTA` unset) without changing the codec. The delta stage requires a 1× packet buffer for the previous-packet reference.
 
-### 6.2 Context Mixing
+### 6.2 Context Model
 
-For bytes with position-dependent distributions (headers vs. payload), netc uses context mixing:
+netc uses **coarse context buckets** — not per-byte-position probability tables. A per-byte-position model would require one 256-entry frequency table per byte offset, exploding to 1500 tables for a 1500-byte packet with overfitting on small corpora.
 
-- Byte position context (top 8 bits of position)
-- Previous byte context (bigram model)
-- Field-type context (inferred from training)
+Instead, bytes are grouped into offset ranges with one probability model per bucket:
 
-Each context maintains a separate probability model (256-entry frequency table).
+| Context bucket | Byte offset range | Typical content |
+|----------------|-------------------|-----------------|
+| `CTX_HEADER`   | 0 – 15            | Protocol header, flags, type fields |
+| `CTX_SUBHEADER`| 16 – 63           | Sequence numbers, session IDs, lengths |
+| `CTX_BODY`     | 64 – 255          | Payload fields, state data |
+| `CTX_TAIL`     | 256 – 1499        | Bulk payload, extended data |
 
-### 6.3 ANS Coding
+Each bucket maintains:
+- A 256-entry frequency table (tANS symbol probabilities)
+- A bigram table (previous-byte → current-byte, optional, controlled by `NETC_PKT_FLAG_BIGRAM`)
 
-rANS state transition:
+Bucket boundaries are compile-time constants, not tunable at runtime in v0.1. The training algorithm assigns each corpus byte to a bucket by offset and computes per-bucket frequency tables.
+
+### 6.3 tANS Coding
+
+tANS (tabular ANS / FSE) decode is fully table-driven. For each symbol, decoding requires one table lookup and one state transition — no division in the decode loop:
 
 ```c
-// Encode symbol s with frequency freq[s], total M
-state = (state / freq[s]) * M + cumfreq[s] + (state % freq[s]);
-
-// Decode: given state x, find symbol s where cumfreq[s] <= (x % M) < cumfreq[s+1]
-slot = x % M;
-s = symbol_lookup[slot];  // O(1) table lookup
-x = freq[s] * (x / M) + slot - cumfreq[s];
+// tANS decode step (per symbol)
+uint32_t slot  = state & ((1 << TABLE_LOG) - 1);   // TABLE_LOG = 12 for 4096-entry table
+uint8_t  sym   = decode_table[slot].symbol;
+uint8_t  nb    = decode_table[slot].nb_bits;
+uint16_t next  = decode_table[slot].next_state;
+state = (state >> nb) | (bitstream_peek(nb) << (32 - nb));
+emit(sym);
 ```
 
-The ANS state is flushed to the output stream as a 32-bit or 64-bit word when it exceeds the normalization range.
+The tANS state at any point is a single `uint32_t` plus the bitstream read cursor (byte offset + bit offset). Together these constitute the full checkpoint — required for UDP stateless snapshots.
 
-### 6.4 Small Packet Optimization
+Encode uses the inverse table (symbol → state transition). Both tables fit in 16 KB (4096 entries × 4 bytes) and reside in L1 cache on all modern CPUs.
 
-For packets ≤ 64 bytes:
-- Skip delta encoding (insufficient history)
-- Use tANS with 12-bit table (4096 entries, fits in L1 cache)
-- Output includes 2-byte tANS table index for decoder
+### 6.4 Passthrough Threshold
 
-For packets > 64 bytes:
-- Apply full NETC-LowE pipeline
-- Use rANS with interleaved dual streams for higher throughput
+If `compressed_size ≥ original_size` after the full pipeline, the packet header is written with `NETC_ALG_PASSTHRU` and the original uncompressed bytes are emitted. The caller is guaranteed that output size ≤ input size + `NETC_MAX_OVERHEAD` (8 bytes header). See AD-006.
 
 ---
 
@@ -309,44 +325,45 @@ typedef struct {
 
 ## 8. Stream Format
 
-### 8.1 TCP Stream
+netc defines two wire layouts depending on whether the caller uses stateful or stateless mode. The caller is responsible for choosing the appropriate layout and for transmitting the resulting bytes via whatever transport or buffer mechanism they use. netc has no knowledge of sockets, connections, or framing.
 
-For TCP connections, a shared compression context accumulates history:
+### 8.1 Stateful Stream Header
+
+When the caller uses `netc_compress` (stateful mode) over an ordered, reliable channel, the channel SHOULD begin with a stream header that establishes the shared compression context parameters:
 
 ```
 ┌──────────┬──────────────────────────────────────────────┐
-│  Stream  │ [Header][Packet0][Packet1]...[PacketN]        │
-│  Header  │                                              │
-│  (16B)   │                                              │
+│  Stream  │ [Header][Payload0][Payload1]...[PayloadN]     │
+│  Header  │                                               │
+│  (16B)   │                                               │
 └──────────┴──────────────────────────────────────────────┘
 
 Stream Header:
   [0..3]  magic = 0x4E455443
   [4..5]  version
   [6..7]  flags
-  [8..11] dict_id (reference to negotiated dictionary)
-  [12..15] reserved
+  [8..11] dict_id (reference to negotiated dictionary blob)
+  [12]    model_id (active dictionary/model version for this stream)
+  [13..15] reserved
 ```
 
-### 8.2 UDP Datagram
+This header is **optional and transport-agnostic** — the caller may negotiate `dict_id` and `model_id` out-of-band (e.g., via a handshake message, config file, or application-level protocol) and omit this header entirely. netc does not require or enforce this header format.
 
-Each UDP packet is self-contained (no shared state by default):
+### 8.2 Stateless Payload
+
+When the caller uses `netc_compress_stateless`, each compressed buffer is fully self-contained. The 8-byte packet header (§9.1) carries all necessary decoding information. No stream header is required.
 
 ```
-┌────────────────────────────────────────────────────────┐
-│ [2B flags][2B orig_size][compressed payload]            │
-└────────────────────────────────────────────────────────┘
-
-Flags:
-  bit 0: NETC_FLAG_COMPRESSED (0=uncompressed passthrough)
-  bit 1: NETC_FLAG_DICT_PRESENT (dict_id follows flags)
-  bit 2: NETC_FLAG_DELTA (delta against previous packet in sequence)
-  bit 3-15: reserved
+┌──────────────────────────────────────────────────────────┐
+│ [8B netc header][compressed payload]                      │
+└──────────────────────────────────────────────────────────┘
 ```
+
+This layout is suitable for any channel where payloads may arrive out of order, be lost, or be processed independently — regardless of whether the underlying transport is UDP, QUIC, a ring buffer, shared memory, or anything else.
 
 ### 8.3 Passthrough Mode
 
-If compressed size ≥ original size, netc emits the original uncompressed payload with `NETC_FLAG_COMPRESSED = 0`. This guarantees netc never increases payload size.
+If compressed size ≥ original size, netc emits the original uncompressed payload with `NETC_PKT_FLAG_PASSTHRU` set. This guarantees the netc output is always ≤ input size + 8 bytes (header overhead).
 
 ---
 
@@ -357,22 +374,51 @@ If compressed size ≥ original size, netc emits the original uncompressed paylo
 ```
 Offset  Size  Field
 ──────  ────  ─────────────────────────────────────────────
-0       2     original_size  (uint16, max 65535)
+0       2     original_size   (uint16, max 65535)
 2       2     compressed_size (uint16)
-4       1     flags          (NETC_PKT_FLAG_*)
-5       1     algorithm      (NETC_ALG_ANS | NETC_ALG_HUFFMAN | NETC_ALG_PASSTHRU)
-6       2     context_seq    (rolling sequence for delta, UDP mode)
+4       1     flags           (NETC_PKT_FLAG_*)
+5       1     algorithm       (NETC_ALG_TANS | NETC_ALG_RANS | NETC_ALG_PASSTHRU)
+6       1     model_id        (uint8, identifies dictionary + context model version)
+7       1     context_seq     (uint8, rolling sequence counter for delta, UDP mode)
 8       N     compressed_payload
 ```
 
-### 9.2 Flags
+**Total header size**: 8 bytes. `NETC_MAX_OVERHEAD` = 8.
+
+### 9.2 model_id — Dictionary and Model Versioning
+
+`model_id` is an 8-bit opaque identifier assigned by the server at dictionary training time. It uniquely identifies the combination of dictionary content and context model parameters (bucket boundaries, compression level). The decompressor uses `model_id` to select the correct dictionary when multiple are loaded.
+
+**Rolling upgrade semantics**: During a dictionary update, the server MUST accept packets from at least two consecutive `model_id` values simultaneously (the outgoing and incoming dictionary). The transition window is application-defined but SHOULD be ≥ 1 second of client heartbeat interval.
+
+```
+Server upgrade sequence:
+  1. Train new dictionary → assign model_id = N+1
+  2. Broadcast model_id = N+1 to all clients (out-of-band, e.g., connect message)
+  3. Accept model_id = N (old) AND model_id = N+1 (new) during transition
+  4. After transition window: stop accepting model_id = N
+  5. Remove old dictionary from memory
+```
+
+`model_id = 0` is reserved and means "no model / passthrough only". `model_id = 255` is reserved for future use.
+
+### 9.3 Algorithm Values
+
+```c
+#define NETC_ALG_TANS     0x01  // tANS (FSE) — primary codec, v0.1+
+#define NETC_ALG_RANS     0x02  // rANS — secondary codec, v0.2+ (opt-in)
+#define NETC_ALG_PASSTHRU 0xFF  // Uncompressed passthrough (no compression applied)
+```
+
+The `algorithm` field allows decoders to support multiple algorithm variants without a breaking wire format change.
+
+### 9.4 Flags
 
 ```c
 #define NETC_PKT_FLAG_DELTA      0x01  // Delta-encoded from previous packet
 #define NETC_PKT_FLAG_BIGRAM     0x02  // Bigram context model active
-#define NETC_PKT_FLAG_SMALL      0x04  // Small packet path (tANS)
-#define NETC_PKT_FLAG_PASSTHRU   0x08  // Uncompressed passthrough
-#define NETC_PKT_FLAG_DICT_ID    0x10  // Explicit dict_id present in header
+#define NETC_PKT_FLAG_PASSTHRU   0x04  // Uncompressed passthrough (see AD-006)
+#define NETC_PKT_FLAG_DICT_ID    0x08  // Explicit dict_id present in stream header
 ```
 
 ---
@@ -462,18 +508,29 @@ netc_result_t netc_decompress_stateless(
 ```c
 typedef struct {
     uint32_t flags;             // NETC_CFG_FLAG_*
-    size_t   ring_buffer_size;  // History ring buffer (default: 64KB)
+    size_t   ring_buffer_size;  // History ring buffer for stateful mode (default: 64KB, 0=disable)
     uint8_t  compression_level; // 0=fastest, 9=best ratio (default: 5)
     uint8_t  simd_level;        // 0=auto, 1=generic, 2=SSE4.2, 3=AVX2, 4=NEON
     size_t   arena_size;        // Pre-allocated memory arena (0=use default)
 } netc_cfg_t;
 
-#define NETC_CFG_FLAG_TCP_MODE    0x01  // Stateful TCP compression
-#define NETC_CFG_FLAG_UDP_MODE    0x02  // Stateless UDP compression
-#define NETC_CFG_FLAG_DELTA       0x04  // Enable inter-packet delta
+// Stateful: context accumulates history across sequential netc_compress calls.
+// Use when payloads arrive in order with no loss (reliable ordered channel).
+// Compatible with: TCP, QUIC streams, ordered IPC, ring buffers, any reliable medium.
+#define NETC_CFG_FLAG_STATEFUL    0x01
+
+// Stateless: each netc_compress_stateless call is fully independent.
+// Use when payloads may arrive out of order, be lost, or be processed independently.
+// ring_buffer_size is ignored when this flag is set.
+// Compatible with: UDP datagrams, QUIC unreliable datagrams, shared memory, any medium.
+#define NETC_CFG_FLAG_STATELESS   0x02
+
+#define NETC_CFG_FLAG_DELTA       0x04  // Enable inter-payload delta prediction
 #define NETC_CFG_FLAG_BIGRAM      0x08  // Enable bigram context model
 #define NETC_CFG_FLAG_STATS       0x10  // Collect compression statistics
 ```
+
+**Transport agnosticism**: `NETC_CFG_FLAG_STATEFUL` and `NETC_CFG_FLAG_STATELESS` describe the **calling pattern**, not the transport protocol. A caller using TCP but processing each payload independently SHOULD use `NETC_CFG_FLAG_STATELESS`. A caller using a custom reliable ordered ring buffer SHOULD use `NETC_CFG_FLAG_STATEFUL`. The choice belongs entirely to the caller.
 
 ### 10.5 Return Codes
 
@@ -487,7 +544,7 @@ typedef enum {
     NETC_ERR_BUF_SMALL     = -5,  // Output buffer too small
     NETC_ERR_CTX_NULL      = -6,  // NULL context pointer
     NETC_ERR_UNSUPPORTED   = -7,  // Algorithm/feature not supported
-    NETC_ERR_VERSION       = -8,  // Dictionary version mismatch
+    NETC_ERR_VERSION       = -8,  // Dictionary format version or model_id mismatch
 } netc_result_t;
 ```
 

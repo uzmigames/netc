@@ -21,6 +21,12 @@
 - [ ] 3.4 Zstd adapter (level=1, level=3, level=1+dict)
 - [ ] 3.5 Reference Huffman adapter (static, trained on same corpus)
 - [ ] 3.6 Snappy adapter (optional, skip if not found)
+- [ ] 3.7 OodleNetwork adapter (bench_oodle.c, compiled only if NETC_BENCH_WITH_OODLE=ON)
+  - UDP stateless: OodleNetwork1UDP_Train + OodleNetwork1UDP_Encode/Decode
+  - TCP stateful: OodleNetwork1TCP_Train + OodleNetwork1TCP_Encode/Decode
+  - SDK path via CMake variable UE5_OODLE_SDK or env var
+  - Links against oo2net_win64.lib (Windows) / liboo2netlinux64.a (Linux)
+  - Train on same corpus as netc (same packet count, same seed)
 
 ## 4. Benchmark Runner
 - [ ] 4.1 Implement single-packet latency benchmark loop (100,000 iterations)
@@ -37,12 +43,14 @@
 ## 6. CI Gate Checker
 - [ ] 6.1 Implement --ci-check mode (runs all PERF-*, RATIO-*, SAFETY-*, MEM-* gates)
 - [ ] 6.2 Implement COMP-* comparison gates (netc vs LZ4, zlib, Zstd)
-- [ ] 6.3 Implement baseline regression check (±5% warning, ±15% fail)
-- [ ] 6.4 Implement baseline save/load (bench/baselines/*.json)
-- [ ] 6.5 Exit code 0 on pass, 1 on fail
+- [ ] 6.3 Implement OODLE-* comparison gates (netc vs OodleNetwork, when --with-oodle is active)
+- [ ] 6.4 Implement baseline regression check (±5% warning, ±15% fail)
+- [ ] 6.5 Implement baseline save/load (bench/baselines/*.json)
+- [ ] 6.6 Exit code 0 on pass, 1 on fail
 
 ## 7. CLI and Build Integration
-- [ ] 7.1 Implement CLI argument parsing (--workload, --compressor, --count, --seed, --format, --output, --ci-check)
+- [ ] 7.1 Implement CLI argument parsing (--workload, --compressor, --count, --seed, --format, --output, --ci-check, --with-oodle, --oodle-sdk, --oodle-htbits, --oodle-gates)
 - [ ] 7.2 CMake target: bench (optional deps: zlib, lz4, zstd detected via pkg-config)
-- [ ] 7.3 GitHub Actions: benchmark CI job (runs --ci-check, uploads results artifact)
-- [ ] 7.4 Write bench README with usage examples
+- [ ] 7.3 CMake option: NETC_BENCH_WITH_OODLE (default OFF); when ON, requires UE5_OODLE_SDK path
+- [ ] 7.4 GitHub Actions: benchmark CI job (runs --ci-check, uploads results artifact; no Oodle in CI)
+- [ ] 7.5 Write bench README with usage examples including Oodle comparison instructions

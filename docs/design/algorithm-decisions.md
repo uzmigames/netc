@@ -8,41 +8,60 @@ Status:   DRAFT
 
 ## Decision Log
 
-### AD-001: ANS over Huffman as primary codec
+### AD-001: tANS (FSE) as primary codec, rANS as secondary
 
-**Decision**: Use Asymmetric Numeral Systems (rANS) as the primary entropy coder, with Huffman as fallback for edge cases.
+**Decision**: Use tabular ANS (tANS/FSE) as the default entropy coder. rANS is available as an opt-in secondary path and will be evaluated by the benchmark harness before being promoted.
 
 **Rationale**:
-- ANS achieves fractional-bit precision vs. Huffman's integer-bit rounding (5–15% better ratio)
-- ANS decode speed is comparable to Huffman decode with lookup tables
-- Zstd uses FSE (Finite State Entropy = tANS), validating the approach at production scale
-- rANS state is a single 64-bit integer — trivial to checkpoint/restore for UDP stateless mode
+- tANS decode is fully table-driven: one table lookup + one state transition per symbol. No division in the decode loop.
+- rANS requires 64-bit division/modulo for every symbol encode step — measurably slower on some CPUs in hot-path conditions, despite being theoretically parallelizable.
+- Zstd uses FSE (= tANS) for all entropy coding at production scale. This is strong prior art.
+- tANS is a single implementation covering all packet sizes — simpler codebase, simpler fuzz surface.
+- rANS checkpoint is NOT just saving a u64 state. It requires saving: state word + bitstream cursor (byte offset + bit offset within byte) + any pending renormalization. This makes rANS more complex for UDP stateless snapshots than originally stated in this ADR.
+
+**v0.2 path for rANS**: If the benchmark harness (RFC-002) shows rANS outperforms tANS on the ≥ 256-byte workloads (WL-003, WL-005), rANS will be added as an explicit codec path selected via the `algorithm` field in the packet header.
 
 **Rejected alternatives**:
 - Pure Huffman: Integer bit limitation costs ratio on skewed distributions
 - Arithmetic coding: Slower than ANS, patent concerns historically (now expired but reputation remains)
 - LZ77-based: Works well for long matches, but game packets are too small for match finding to pay off
 
-### AD-002: Delta encoding as a pre-pass, not integrated into ANS
+### AD-002: Delta encoding as a pre-pass — field-class aware, not byte-a-byte blind
 
-**Decision**: Apply byte-level delta prediction before entropy coding as a separate stage.
+**Decision**: Apply delta prediction before entropy coding as a separate, disableable stage. The delta strategy is **field-class aware**: different prediction functions are applied depending on the byte's structural role, not uniformly across all bytes.
+
+**Field classes and their delta strategies**:
+
+| Field class | Examples | Delta strategy |
+|-------------|----------|----------------|
+| Integer counters | sequence numbers, tick IDs, entity IDs | Byte subtraction from previous packet (wrapping) |
+| Enum / flags | message type, ability flags, bitmasks | XOR with previous packet byte |
+| Float components | position.x/y/z, velocity, rotation | XOR with previous packet byte (preserves mantissa delta better than subtraction) |
+| Fixed strings / GUIDs | player ID, asset hash | Passthrough (high entropy, delta would increase size) |
+| Repeated constants | protocol version, static headers | Passthrough or skip (entropy already near 0) |
+
+Field classes are inferred from the training corpus (entropy + variance per byte offset), not from an explicit schema. This keeps netc schema-agnostic while still being smarter than uniform byte subtraction.
 
 **Rationale**:
-- Separation of concerns: delta prediction logic is independent of codec
-- Delta can be disabled without changing the codec
-- Simpler implementation and testing
-- Delta residuals are independently entropy-coded per position, matching how ANS probability tables are organized
+- Blind byte-a-byte subtraction on IEEE 754 floats produces high-entropy residuals (exponent bits cancel poorly). XOR preserves the mantissa delta pattern which has lower entropy.
+- Separation of concerns: delta stage is independent of the entropy codec.
+- Delta can be disabled per-packet (NETC_PKT_FLAG_DELTA unset) without changing the codec.
 
-**Tradeoff**: Requires 2× packet buffer for the delta pass. For 1500-byte packets, this is 3KB extra — acceptable.
+**Tradeoff**: Requires 2× packet buffer for the delta pass. For 1500-byte packets, this is 3KB extra — within the arena budget.
 
-### AD-003: Separate tANS for small packets (≤ 64 bytes)
+**What this is NOT**: This is not a schema-aware codec (no per-field protobuf/flatbuffer introspection). Field class inference is statistical, not structural. Schema-aware transforms are a v0.2+ feature.
 
-**Decision**: Use tabular ANS (tANS/FSE) for packets ≤ 64 bytes, rANS for larger.
+### AD-003: Single tANS codec for all packet sizes; threshold determined by benchmark
+
+**Decision**: Use tANS (FSE) as the single entropy coder for all packet sizes. The "tANS for small, rANS for large" split from the original draft is **deferred pending benchmark data**.
 
 **Rationale**:
-- rANS requires normalization (flush) every few symbols; for 8-symbol packets, flush overhead dominates
-- tANS uses a fixed-size decode table (4096 entries for 12-bit table = 8KB, fits in L1)
-- tANS decode is branch-free: single table lookup + state transition
+- The original threshold of "≤ 64 bytes" was a heuristic, not a measured crossover point. The real crossover (if any) depends on CPU microarchitecture, table size, flush frequency, and packet distribution — all measurable by the benchmark harness.
+- Maintaining two separate codecs (tANS + rANS) doubles the implementation surface, the test/fuzz surface, and the number of decoder paths.
+- tANS with a 12-bit table (4096 entries × 4 bytes = 16 KB) fits in L1 on all modern CPUs. Its branch-free decode loop is efficient at all packet sizes.
+- If benchmark data (RFC-002, WL-001 through WL-008) shows a measurable throughput gain from a size-based split, the threshold will be determined empirically and added as a build-time constant, not a fixed magic number in the spec.
+
+**What changed from the original draft**: The `≤ 64 bytes` threshold and the tANS/rANS split are removed from v0.1 scope. The packet header `algorithm` field already accommodates future algorithm variants without a breaking wire format change.
 
 ### AD-004: Static dictionary, no adaptive update during operation
 
@@ -86,3 +105,20 @@ Status:   DRAFT
 - C is the universal FFI baseline — Rust, Go, Python, Java all call C directly
 - Zig has better safety guarantees but immature ecosystem; FFI compatibility requires C ABI anyway
 - C++ templates add complexity and compilation time without meaningful benefit for this use case
+
+**Known caveat — MSVC `_Atomic`**: MSVC's C11 support for `_Atomic` is incomplete in practice (MSVC 2019 supports it partially; MSVC 2022 is better but has edge cases with compound types). See AD-008.
+
+### AD-008: netc_platform.h — portability abstraction for atomics and alignment
+
+**Decision**: All uses of `_Atomic`, `_Alignas`, and compiler-specific intrinsics are isolated behind a `src/util/netc_platform.h` header. No direct use of these constructs outside that header.
+
+**Rationale**:
+- MSVC C11 `_Atomic` support is incomplete. MSVC requires `<stdatomic.h>` from C11 mode (`/std:c11`) but behavior of atomic compound ops on non-trivial types differs from GCC/Clang.
+- Rather than sprinkling `#ifdef _MSC_VER` throughout the codebase, a single platform header provides:
+  - `NETC_ATOMIC(T)` — expands to `_Atomic T` (GCC/Clang) or `volatile T` + `InterlockedExchange` (MSVC fallback)
+  - `NETC_ALIGN(N)` — expands to `_Alignas(N)` (GCC/Clang/MSVC 2022+) or `__declspec(align(N))` (MSVC fallback)
+  - `NETC_LIKELY(x)` / `NETC_UNLIKELY(x)` — branch prediction hints
+  - `NETC_INLINE` — `__attribute__((always_inline))` or `__forceinline`
+- This keeps the core implementation clean C11 while remaining buildable on all target toolchains.
+
+**Scope**: `netc_platform.h` is an internal header only. It is not part of the public `netc.h` API.

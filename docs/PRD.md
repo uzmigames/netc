@@ -67,6 +67,8 @@ There is no open-source, production-quality C library that:
 | G-14 | UDP stateless per-packet compression |
 | G-15 | Thread-safe context model (one context per thread) |
 | G-16 | Dictionary training from packet capture files (pcap) |
+| G-17 | **Native C++ SDK** with RAII wrappers for Unreal Engine 5 integration |
+| G-18 | **Native C# SDK** with Span-based, GC-pressure-free API for Unity and Godot 4 |
 
 ### 3.3 Non-Goals (Out of Scope)
 
@@ -83,6 +85,9 @@ There is no open-source, production-quality C library that:
 | User | Use Case | Key Requirement |
 |------|----------|-----------------|
 | Game server developers | Reduce bandwidth for entity state sync | < 1µs latency, ≥ 5 Mpps |
+| Unreal Engine 5 developers | Reduce replication bandwidth, 100+ player servers | C++ SDK, UE5 plugin, zero alloc |
+| Unity developers | Compress Mirror/FishNet/NGO transport packets | C# SDK, zero GC pressure |
+| Godot 4 developers | Compress ENet/WebRTC multiplayer packets | C# SDK, MultiplayerPeer wrapper |
 | Financial trading systems | Compress market data tick streams | Deterministic latency, high ratio |
 | IoT/telemetry platforms | Aggregate sensor packet streams | Low memory footprint, good ratio |
 | Network researchers | Benchmark compression algorithms | Reproducible benchmark harness |
