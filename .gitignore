@@ -105,3 +105,9 @@ vcpkg_installed/
 *.sdf
 *.VC.db
 *.VC.opendb
+
+# Rulebook - ignore runtime data, keep specs and tasks
+/.rulebook/*
+!/.rulebook/specs/
+!/.rulebook/tasks/
+!/.rulebook/rulebook.json
