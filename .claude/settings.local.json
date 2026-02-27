@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__rulebook__rulebook_memory_search",
+      "mcp__rulebook__rulebook_task_create",
+      "mcp__rulebook__rulebook_task_validate",
+      "mcp__rulebook__rulebook_memory_save"
+    ]
+  }
+}
