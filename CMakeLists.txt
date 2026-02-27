@@ -170,9 +170,90 @@ if(NETC_BUILD_TESTS)
     add_netc_test(test_tans_debug tests/test_tans_debug.c)
     add_netc_test(test_delta      tests/test_delta.c)
     add_netc_test(test_simd       tests/test_simd.c)
+    add_netc_test(test_security   tests/test_security.c)
     add_executable(compress_debug tests/test_compress_debug.c)
     target_include_directories(compress_debug PRIVATE ${UNITY_INC} include src)
     target_link_libraries(compress_debug PRIVATE netc)
+endif()
+
+# =============================================================================
+# Fuzz targets (clang -fsanitize=fuzzer only — not built by default)
+# =============================================================================
+option(NETC_BUILD_FUZZ "Build libFuzzer fuzz targets (requires clang)" OFF)
+if(NETC_BUILD_FUZZ)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(WARNING "NETC_BUILD_FUZZ=ON requires clang; current compiler: ${CMAKE_C_COMPILER_ID}")
+    endif()
+
+    function(add_fuzz_target name src)
+        add_executable(${name} ${src})
+        target_include_directories(${name} PRIVATE include src)
+        target_link_libraries(${name} PRIVATE netc)
+        target_compile_options(${name} PRIVATE -fsanitize=fuzzer,address,undefined -O1 -g)
+        target_link_options(${name} PRIVATE -fsanitize=fuzzer,address,undefined)
+    endfunction()
+
+    add_fuzz_target(fuzz_decompress tests/fuzz_decompress.c)
+    add_fuzz_target(fuzz_dict_load  tests/fuzz_dict_load.c)
+    add_fuzz_target(fuzz_compress   tests/fuzz_compress.c)
+
+    message(STATUS "Fuzz targets enabled: fuzz_decompress fuzz_dict_load fuzz_compress")
+endif()
+
+# =============================================================================
+# Coverage target (gcov / llvm-cov — GCC or clang Debug builds only)
+# =============================================================================
+option(NETC_ENABLE_COVERAGE "Enable gcov/llvm-cov coverage instrumentation" OFF)
+if(NETC_ENABLE_COVERAGE)
+    if(MSVC)
+        message(WARNING "NETC_ENABLE_COVERAGE not supported on MSVC; use clang or GCC")
+    else()
+        # Instrument the library and test executables
+        target_compile_options(netc PRIVATE --coverage -O0 -g)
+        target_link_options(netc PRIVATE --coverage)
+
+        # Coverage report target (after running ctest)
+        find_program(LCOV_BIN lcov)
+        find_program(GENHTML_BIN genhtml)
+        if(LCOV_BIN AND GENHTML_BIN)
+            add_custom_target(coverage
+                COMMAND ${LCOV_BIN} --directory . --capture --output-file coverage.info
+                COMMAND ${LCOV_BIN} --remove coverage.info
+                        '*/vendor/*' '*/tests/*' '/usr/*'
+                        --output-file coverage_filtered.info
+                COMMAND ${GENHTML_BIN} coverage_filtered.info
+                        --output-directory coverage_html
+                COMMAND ${LCOV_BIN} --summary coverage_filtered.info
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Generating coverage report → ${CMAKE_BINARY_DIR}/coverage_html/index.html"
+                VERBATIM
+            )
+            message(STATUS "Coverage target: cmake --build . --target coverage")
+        else()
+            message(STATUS "lcov/genhtml not found; coverage HTML report unavailable")
+        endif()
+    endif()
+endif()
+
+# =============================================================================
+# PGO build support (GCC / clang; three-step: instrument → profile → optimized)
+# =============================================================================
+option(NETC_PGO_INSTRUMENT  "Step 1: build with PGO instrumentation"        OFF)
+option(NETC_PGO_OPTIMIZE    "Step 3: build with PGO profile data applied"    OFF)
+set(NETC_PGO_DATA_DIR "${CMAKE_BINARY_DIR}/pgo_data" CACHE PATH "PGO profile data directory")
+
+if(NETC_PGO_INSTRUMENT AND NOT MSVC)
+    message(STATUS "PGO: instrumentation build — run bench to generate profile data")
+    target_compile_options(netc PRIVATE -fprofile-generate=${NETC_PGO_DATA_DIR})
+    target_link_options(netc   PRIVATE -fprofile-generate=${NETC_PGO_DATA_DIR})
+elseif(NETC_PGO_OPTIMIZE AND NOT MSVC)
+    if(NOT EXISTS "${NETC_PGO_DATA_DIR}")
+        message(FATAL_ERROR "PGO profile data directory not found: ${NETC_PGO_DATA_DIR}\n"
+                "Run an instrumentation build first: cmake -DNETC_PGO_INSTRUMENT=ON .")
+    endif()
+    message(STATUS "PGO: optimized build using profile data from ${NETC_PGO_DATA_DIR}")
+    target_compile_options(netc PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR} -fprofile-correction)
+    target_link_options(netc   PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR})
 endif()
 
 # =============================================================================
