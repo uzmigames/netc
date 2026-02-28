@@ -40,6 +40,12 @@ typedef struct {
 #define BENCH_DEFAULT_COUNT   100000u
 #define BENCH_DEFAULT_SEED    42u
 
+/* Evaluation seed offset: test packets come from seed + OFFSET so they are
+ * from the same distribution but unseen during training.  This prevents
+ * dictionary-based compressors (e.g. OodleNetwork) from getting an unfair
+ * advantage by hash-matching raw training bytes in their window. */
+#define BENCH_EVAL_SEED_OFFSET  0x1000001u
+
 /* =========================================================================
  * Run one benchmark: compress + decompress latency for a workload
  * ========================================================================= */

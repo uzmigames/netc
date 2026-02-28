@@ -6,6 +6,7 @@
  */
 
 #include "bench_compressor.h"
+#include "bench_runner.h"
 #include "bench_timer.h"
 #include "bench_stats.h"
 #include <stdlib.h>
@@ -35,8 +36,11 @@ int bench_run_generic(const bench_generic_cfg_t *cfg,
         return -1;
     }
 
+    /* Use eval seed so test packets are unseen during training */
+    uint64_t eval_seed = cfg->seed + BENCH_EVAL_SEED_OFFSET;
+
     bench_corpus_t corpus;
-    bench_corpus_init(&corpus, wl, cfg->seed);
+    bench_corpus_init(&corpus, wl, eval_seed);
     if (c->reset) c->reset(c);
 
     uint64_t total_orig  = 0;

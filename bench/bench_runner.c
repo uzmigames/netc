@@ -41,8 +41,14 @@ int bench_run(const bench_run_cfg_t *cfg,
         return -1;
     }
 
+    /* Use eval seed (different from training seed) so test packets are
+     * from the same distribution but were NOT in the training corpus.
+     * This prevents dictionary-window compressors (Oodle) from getting
+     * an unfair exact-match advantage when train == test seed. */
+    uint64_t eval_seed = cfg->seed + BENCH_EVAL_SEED_OFFSET;
+
     bench_corpus_t corpus;
-    bench_corpus_init(&corpus, wl, cfg->seed);
+    bench_corpus_init(&corpus, wl, eval_seed);
     bench_netc_reset(netc);
 
     uint64_t total_orig_bytes = 0;

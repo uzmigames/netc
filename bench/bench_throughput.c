@@ -3,6 +3,7 @@
  */
 
 #include "bench_throughput.h"
+#include "bench_runner.h"
 #include "bench_corpus.h"
 #include "bench_timer.h"
 
@@ -22,8 +23,11 @@ static int throughput_run_internal(const bench_throughput_cfg_t *cfg,
                                    bench_compressor_t            *c,
                                    bench_throughput_result_t     *out)
 {
+    /* Use eval seed so test packets differ from training corpus */
+    uint64_t eval_seed = cfg->seed + BENCH_EVAL_SEED_OFFSET;
+
     bench_corpus_t corpus;
-    bench_corpus_init(&corpus, wl, cfg->seed);
+    bench_corpus_init(&corpus, wl, eval_seed);
 
     uint8_t cmp_buf[SCRATCH_CAP];
     uint8_t dec_buf[BENCH_CORPUS_MAX_PKT];
@@ -37,9 +41,6 @@ static int throughput_run_internal(const bench_throughput_cfg_t *cfg,
 
     /* Reset corpus to measurement position */
     bench_corpus_reset(&corpus);
-    /* Advance past warmup again — or simpler: re-init with same seed */
-    bench_corpus_init(&corpus, wl, cfg->seed);
-    for (size_t i = 0; i < cfg->warmup; i++) bench_corpus_next(&corpus);
 
     /* ---- Compression pass ---- */
     uint64_t total_orig  = 0;
