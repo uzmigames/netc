@@ -14,7 +14,7 @@
  *     - Frequency tables sum to TABLE_SIZE after training
  *   Serialization (save):
  *     - NULL args → NETC_ERR_INVALID_ARG
- *     - Blob size equals expected DICT_BLOB_SIZE (2060 bytes)
+ *     - Blob size equals expected DICT_BLOB_SIZE (8204 bytes, v0.2 with 16 buckets)
  *     - Magic and model_id readable from blob
  *   Deserialization (load):
  *     - NULL args → NETC_ERR_INVALID_ARG
@@ -34,12 +34,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-/* Match the blob size from netc_dict.c */
-#define NETC_CTX_COUNT      4U
+/* Match the blob size from netc_dict.c (v0.2: 16 buckets) */
+#define NETC_CTX_COUNT      16U
 #define NETC_TANS_SYMBOLS   256U
 #define NETC_TANS_TABLE_SIZE 4096U
-/* 4 (magic) + 1 (version) + 1 (model_id) + 2 (pad) + 4*256*2 (freq) + 4 (crc) */
-#define EXPECTED_BLOB_SIZE  (4U + 1U + 1U + 2U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
+/* 8 (header: magic+version+model_id+ctx_count+pad) + 16*256*2 (freq) + 4 (crc) = 8204 */
+#define EXPECTED_BLOB_SIZE  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
 
 /* =========================================================================
  * Sample training data — representative byte sequences

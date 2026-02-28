@@ -9,6 +9,7 @@
 
 #ifdef NETC_BENCH_WITH_ZSTD
 #include <zstd.h>
+#include <zdict.h>
 #endif
 
 /* =========================================================================

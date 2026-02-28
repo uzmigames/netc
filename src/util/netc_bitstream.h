@@ -50,18 +50,25 @@ static NETC_INLINE void netc_bsw_init(netc_bsw_t *w, void *buf, size_t cap) {
 }
 
 /**
- * Write `nb` bits from value `v` (LSB-first).
- * nb must be 0–32. Caller must ensure the buffer has sufficient space.
- * Returns 0 on success, -1 on buffer overflow.
+ * Write `nb` bits from value `v` (LSB-first) — word-at-a-time flush.
+ *
+ * Accumulates bits in a 64-bit register and flushes 4 bytes at once when
+ * the accumulator holds ≥ 32 bits, reducing the flush branch from once per
+ * symbol to once per ~3-4 symbols compared to the byte-at-a-time approach.
+ *
+ * nb must be 0–32. Returns 0 on success, -1 on buffer overflow.
  */
 static NETC_INLINE int netc_bsw_write(netc_bsw_t *w, uint32_t v, int nb) {
-    w->accum |= (uint64_t)(v & (((uint64_t)1 << nb) - 1u)) << w->bits;
+    w->accum |= (uint64_t)v << w->bits;
     w->bits  += nb;
-    while (w->bits >= 8) {
-        if (NETC_UNLIKELY(w->ptr >= w->end)) return -1;
-        *w->ptr++ = (uint8_t)(w->accum & 0xFFU);
-        w->accum >>= 8;
-        w->bits   -= 8;
+    if (w->bits >= 32) {
+        if (NETC_UNLIKELY(w->ptr + 4 > w->end)) return -1;
+        /* Unaligned 4-byte store — memcpy inlines to a single mov on x86/x64 */
+        uint32_t word = (uint32_t)w->accum;
+        memcpy(w->ptr, &word, 4);
+        w->ptr   += 4;
+        w->accum >>= 32;
+        w->bits  -= 32;
     }
     return 0;
 }
@@ -80,11 +87,13 @@ static NETC_INLINE size_t netc_bsw_flush(netc_bsw_t *w) {
     /* Append sentinel 1-bit immediately after data */
     w->accum |= (uint64_t)1u << w->bits;
     w->bits  += 1;
-    /* Flush the partial byte (zero-padded above the sentinel) */
-    if (NETC_UNLIKELY(w->ptr >= w->end)) return (size_t)-1;
-    *w->ptr++ = (uint8_t)(w->accum & 0xFFU);
-    w->accum  = 0;
-    w->bits   = 0;
+    /* Flush remaining bytes one at a time (≤ 4 bytes remain after word flush) */
+    while (w->bits > 0) {
+        if (NETC_UNLIKELY(w->ptr >= w->end)) return (size_t)-1;
+        *w->ptr++ = (uint8_t)(w->accum & 0xFFU);
+        w->accum >>= 8;
+        w->bits   -= 8;
+    }
     return (size_t)(w->ptr - w->start);
 }
 

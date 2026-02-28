@@ -186,11 +186,17 @@ void test_bsw_write_32_bits(void) {
 }
 
 void test_bsw_overflow_returns_error(void) {
-    uint8_t buf[1];
+    /* Word-flush writer accumulates bits in a 64-bit register and flushes
+     * 4 bytes at a time when bits >= 32.  Overflow is detected at the point
+     * the 4-byte store would exceed the buffer end.
+     * Use a 3-byte buffer: first 24 bits fit without a flush (bits=24<32),
+     * then writing 8 more bits brings bits to 32, triggering a 4-byte flush
+     * which exceeds the 3-byte buffer → returns -1. */
+    uint8_t buf[3];
     netc_bsw_t w;
     netc_bsw_init(&w, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_INT(0, netc_bsw_write(&w, 0xFFU, 8));
-    /* Buffer full — next write should fail */
+    TEST_ASSERT_EQUAL_INT(0, netc_bsw_write(&w, 0xFFFFFFU, 24));
+    /* Next write brings bits to 32 → 4-byte flush fails on 3-byte buffer */
     TEST_ASSERT_EQUAL_INT(-1, netc_bsw_write(&w, 0xFFU, 8));
 }
 

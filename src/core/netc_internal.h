@@ -22,7 +22,7 @@
 #define NETC_DEFAULT_RING_SIZE  (64u * 1024u)  /* 64 KB */
 #define NETC_DEFAULT_ARENA_SIZE (NETC_MAX_PACKET_SIZE * 2u + 64u)  /* ~131 KB */
 #define NETC_DICT_MAGIC         0x4E455443U    /* "NETC" */
-#define NETC_DICT_VERSION       1U
+#define NETC_DICT_VERSION       2U             /* v0.2: 16 buckets, ctx_count field */
 
 /* =========================================================================
  * Dictionary internals
@@ -31,16 +31,18 @@
 /**
  * netc_dict_t — trained probability model.
  *
- * Holds per-context-bucket tANS tables built from training data.
- * One table per context bucket (RFC-001 §6.2): HEADER, SUBHEADER, BODY, TAIL.
+ * v0.2: 16 fine-grained context buckets (NETC_CTX_COUNT=16) replacing the
+ * original 4 coarse buckets. Each bucket covers a contiguous byte-offset band.
+ * The ctx_count field makes the blob format self-describing.
  */
 struct netc_dict {
     uint32_t magic;      /* NETC_DICT_MAGIC — sanity check */
-    uint8_t  version;    /* NETC_DICT_VERSION */
+    uint8_t  version;    /* NETC_DICT_VERSION (= 2) */
     uint8_t  model_id;   /* 1–254; 0 = passthrough only; 255 = reserved */
-    uint16_t _pad;
+    uint8_t  ctx_count;  /* Number of context buckets stored (= NETC_CTX_COUNT) */
+    uint8_t  _pad;
 
-    /* Per-context-bucket tANS tables (Phase 2) */
+    /* Per-context-bucket tANS tables — 16 tables in v0.2 */
     netc_tans_table_t tables[NETC_CTX_COUNT];
 
     uint32_t checksum;   /* CRC32 of all preceding fields */

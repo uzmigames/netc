@@ -39,19 +39,38 @@
  * Coprime with TABLE_SIZE=4096 (2563 is odd → GCD(2563,4096)=1). */
 #define NETC_TANS_SPREAD_STEP ((NETC_TANS_TABLE_SIZE >> 1) + (NETC_TANS_TABLE_SIZE >> 3) + 3U)
 
-/* Context bucket indices (RFC-001 §6.2) */
-#define NETC_CTX_HEADER     0U   /* byte offsets [0..15] */
-#define NETC_CTX_SUBHEADER  1U   /* byte offsets [16..63] */
-#define NETC_CTX_BODY       2U   /* byte offsets [64..255] */
-#define NETC_CTX_TAIL       3U   /* byte offsets [256..65535] */
-#define NETC_CTX_COUNT      4U
+/* Context bucket count — 16 fine-grained offset ranges (v0.2+).
+ * Finer granularity allows the entropy coder to specialize per byte-offset band,
+ * reducing cross-region entropy mixing (e.g. zero-padding vs float fields). */
+#define NETC_CTX_COUNT      16U
 
-/* Map a byte offset to its context bucket index */
+/* Backward-compat aliases for the four coarse v0.1 names.
+ * These map to the new bucket indices that cover the same offset ranges. */
+#define NETC_CTX_HEADER     0U   /* offsets [0..7]   — first 8 bytes */
+#define NETC_CTX_SUBHEADER  2U   /* offsets [16..23] — first subheader block */
+#define NETC_CTX_BODY       6U   /* offsets [64..95] — first body block */
+#define NETC_CTX_TAIL      10U   /* offsets [256..383] — first tail block */
+
+/* Map a byte offset to its 16-way context bucket index.
+ * Bucket boundaries are chosen to give 8-byte resolution for small packets
+ * and progressively coarser resolution for larger offsets. */
 static NETC_INLINE uint32_t netc_ctx_bucket(uint32_t offset) {
-    if (offset < 16U)  return NETC_CTX_HEADER;
-    if (offset < 64U)  return NETC_CTX_SUBHEADER;
-    if (offset < 256U) return NETC_CTX_BODY;
-    return NETC_CTX_TAIL;
+    if (offset <    8U) return  0U;   /* [0..7]       */
+    if (offset <   16U) return  1U;   /* [8..15]      */
+    if (offset <   24U) return  2U;   /* [16..23]     */
+    if (offset <   32U) return  3U;   /* [24..31]     */
+    if (offset <   48U) return  4U;   /* [32..47]     */
+    if (offset <   64U) return  5U;   /* [48..63]     */
+    if (offset <   96U) return  6U;   /* [64..95]     */
+    if (offset <  128U) return  7U;   /* [96..127]    */
+    if (offset <  192U) return  8U;   /* [128..191]   */
+    if (offset <  256U) return  9U;   /* [192..255]   */
+    if (offset <  384U) return 10U;   /* [256..383]   */
+    if (offset <  512U) return 11U;   /* [384..511]   */
+    if (offset < 1024U) return 12U;   /* [512..1023]  */
+    if (offset < 4096U) return 13U;   /* [1024..4095] */
+    if (offset <16384U) return 14U;   /* [4096..16383]*/
+    return 15U;                        /* [16384..65535]*/
 }
 
 /* =========================================================================
@@ -88,36 +107,41 @@ NETC_STATIC_ASSERT(sizeof(netc_tans_decode_entry_t) == 4,
 /* =========================================================================
  * tANS encode table entry — one entry per symbol
  *
- * Encode step (given state X ∈ [TABLE_SIZE, 2*TABLE_SIZE)):
- *   f        = freq[sym]
- *   fl       = floor_log2(f)
- *   nb_hi    = encode[sym].nb_hi  (= TABLE_LOG - fl)
- *   nb_lo    = nb_hi - 1          (if f is not a power of 2)
- *   lower    = f << nb_hi         (threshold: X < lower → use nb_lo)
- *   nb       = (X >= lower) ? nb_hi : nb_lo
+ * Encode step (given state X ∈ [TABLE_SIZE, 2*TABLE_SIZE), symbol s):
+ *   freq     = encode[sym].freq   (normalized frequency)
+ *   nb_hi    = encode[sym].nb_hi  (= TABLE_LOG - floor_log2(freq))
+ *   lower    = encode[sym].lower  (= freq << nb_hi, pre-computed threshold)
+ *   nb       = (X >= lower) ? nb_hi : nb_hi - 1
  *   bits     = X & ((1u << nb) - 1)
- *   j        = (X >> nb) - f      (index into symbol's state table)
- *   new_X    = encode[sym].state_table[cumul + j]  (looked up via full table)
+ *   j        = (X >> nb) - freq
+ *   new_X    = encode_state[encode[sym].cumul + j]  (stores TABLE_SIZE+slot)
+ *
+ * All fields needed for normalization live in one 8-byte struct so a single
+ * cache-line fetch covers freq, nb_hi, lower, and cumul — eliminating the
+ * separate netc_freq_table_t lookup in the hot path.
  * ========================================================================= */
 
 typedef struct {
-    uint16_t cumul;   /* Cumulative freq before this symbol (start of encode range) */
-    uint8_t  nb_hi;   /* TABLE_LOG - floor_log2(freq[sym]) */
+    uint16_t freq;    /* Normalized frequency (mirrors freq_table.freq[s]) */
+    uint16_t lower;   /* Pre-computed: freq << nb_hi (normalization threshold) */
+    uint16_t cumul;   /* Cumulative freq before this symbol (encode_state base) */
+    uint8_t  nb_hi;   /* TABLE_LOG - floor_log2(freq) */
     uint8_t  _pad;
-} netc_tans_encode_entry_t;
+} netc_tans_encode_entry_t;  /* 8 bytes — 8 entries per 64-byte cache line */
 
 /* =========================================================================
  * Per-bucket tANS table
  *
- * encode_state[TABLE_SIZE]: maps cumul[s]+j → actual slot in spread table
- *   (the k-th occurrence of symbol s is stored at encode_state[cumul[s]+k])
+ * encode_state[TABLE_SIZE]: maps cumul[s]+j → complete next state X.
+ *   Stores TABLE_SIZE + slot directly so the hot path assigns X without add.
+ *   (the k-th occurrence of symbol s is at encode_state[cumul[s]+k])
  * ========================================================================= */
 
 typedef struct {
     netc_tans_decode_entry_t decode[NETC_TANS_TABLE_SIZE]; /* 16 KB */
-    uint16_t                 encode_state[NETC_TANS_TABLE_SIZE]; /* 8 KB */
-    netc_tans_encode_entry_t encode[NETC_TANS_SYMBOLS];    /* 1 KB */
-    netc_freq_table_t        freq;                          /* 512 B */
+    uint16_t                 encode_state[NETC_TANS_TABLE_SIZE]; /* 8 KB — stores TABLE_SIZE+slot */
+    netc_tans_encode_entry_t encode[NETC_TANS_SYMBOLS];    /* 2 KB (8B per entry) */
+    netc_freq_table_t        freq;                          /* 512 B — kept for dict serialization */
     uint8_t                  valid;  /* 1 if tables are built, 0 otherwise */
     uint8_t                  _pad[3];
 } netc_tans_table_t;
@@ -162,6 +186,41 @@ int netc_tans_decode(
     uint8_t                 *dst,
     size_t                   dst_size,
     uint32_t                 initial_state
+);
+
+/* =========================================================================
+ * Dual-interleaved tANS encoder (x2)
+ *
+ * Encodes src[0..src_size) using two independent ANS states, exposing
+ * instruction-level parallelism to the CPU. Requires src_size >= 2.
+ * Emits bits into bsw; returns the two final states in *out_state0/1.
+ * Returns 0 on success, -1 on error.
+ * ========================================================================= */
+
+int netc_tans_encode_x2(
+    const netc_tans_table_t *tbl,
+    const uint8_t           *src,
+    size_t                   src_size,
+    netc_bsw_t              *bsw,
+    uint32_t                *out_state0,
+    uint32_t                *out_state1
+);
+
+/* =========================================================================
+ * Dual-interleaved tANS decoder (x2)
+ *
+ * Decodes dst_size symbols encoded by netc_tans_encode_x2.
+ * Requires dst_size >= 2 and both initial states in [TABLE_SIZE, 2*TABLE_SIZE).
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_x2(
+    const netc_tans_table_t *tbl,
+    netc_bsr_t              *bsr,
+    uint8_t                 *dst,
+    size_t                   dst_size,
+    uint32_t                 initial_state0,
+    uint32_t                 initial_state1
 );
 
 #endif /* NETC_TANS_H */

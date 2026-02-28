@@ -14,18 +14,19 @@
  *   nb_bits          = TABLE_LOG - floor_log2(f + k)
  *   next_state_base  = (f + k) << nb_bits  ∈ [TABLE_SIZE, 2*TABLE_SIZE)
  *
- * Encode (state X ∈ [TABLE_SIZE, 2*TABLE_SIZE), symbol s, freq f):
- *   fl    = floor_log2(f)
- *   nb_hi = TABLE_LOG - fl
- *   lower = f << nb_hi
+ * Encode (state X ∈ [TABLE_SIZE, 2*TABLE_SIZE), symbol s):
+ *   freq  = encode[s].freq   (from merged entry — no separate freq[] lookup)
+ *   nb_hi = encode[s].nb_hi
+ *   lower = encode[s].lower  (pre-computed freq << nb_hi)
  *   nb    = (X >= lower) ? nb_hi : (nb_hi - 1)
  *   flush nb low bits of X
- *   j     = (X >> nb) - f    [∈ [0, f)]
- *   X_new = TABLE_SIZE + encode_state[cumul[s] + j]
+ *   j     = (X >> nb) - freq  [∈ [0, freq)]
+ *   X_new = encode_state[encode[s].cumul + j]  (stores TABLE_SIZE+slot directly)
  */
 
 #include "netc_tans.h"
 #include "../util/netc_bitstream.h"
+#include "../util/netc_platform.h"
 #include <string.h>
 
 /* =========================================================================
@@ -68,13 +69,21 @@ int netc_tans_build(netc_tans_table_t *tbl, const netc_freq_table_t *freq) {
         cumul[s + 1] = (uint16_t)(cumul[s] + freq->freq[s]);
     }
 
-    /* --- Step 2: Build encode entries (nb_hi, cumul) per symbol --- */
+    /* --- Step 2: Build encode entries (freq, lower, nb_hi, cumul) per symbol ---
+     *
+     * All fields are in one 8-byte struct so the encode hot loop fetches
+     * freq, nb_hi, lower, and cumul in a single cache-line hit, eliminating
+     * the separate netc_freq_table_t lookup.
+     */
     for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
         if (freq->freq[s] == 0) continue;
-        int fl = floor_log2_u32(freq->freq[s]);
-        int nb_hi = (int)NETC_TANS_TABLE_LOG - fl;
+        uint32_t f = freq->freq[s];
+        int fl     = floor_log2_u32(f);
+        int nb_hi  = (int)NETC_TANS_TABLE_LOG - fl;
         if (nb_hi < 0) nb_hi = 0;
+        tbl->encode[s].freq  = (uint16_t)f;
         tbl->encode[s].nb_hi = (uint8_t)nb_hi;
+        tbl->encode[s].lower = (uint16_t)(f << (uint32_t)nb_hi);
         tbl->encode[s].cumul = cumul[s];
     }
 
@@ -99,8 +108,9 @@ int netc_tans_build(netc_tans_table_t *tbl, const netc_freq_table_t *freq) {
         uint32_t f = freq->freq[s];
         for (uint32_t k = 0; k < f; k++) {
             spread_sym[pos] = (uint8_t)s;
-            /* Record that the k-th occurrence of symbol s is at slot pos */
-            tbl->encode_state[cumul[s] + k] = (uint16_t)pos;
+            /* Store TABLE_SIZE + slot so the hot path assigns X directly
+             * without an extra addition: X = encode_state[cumul+j] */
+            tbl->encode_state[cumul[s] + k] = (uint16_t)(NETC_TANS_TABLE_SIZE + pos);
             pos = (pos + NETC_TANS_SPREAD_STEP) & (NETC_TANS_TABLE_SIZE - 1U);
         }
     }
@@ -143,15 +153,12 @@ int netc_tans_build(netc_tans_table_t *tbl, const netc_freq_table_t *freq) {
 /* =========================================================================
  * netc_tans_encode
  *
- * For each symbol s (processing src right-to-left):
- *   f        = freq[s]
- *   fl       = floor_log2(f)
- *   nb_hi    = TABLE_LOG - fl
- *   lower    = f << nb_hi   (threshold for nb_lo vs nb_hi)
- *   nb       = (X >= lower) ? nb_hi : nb_hi - 1
- *   flush nb low bits of X
- *   j        = (X >> nb) - f
- *   X_new    = TABLE_SIZE + encode_state[cumul[s] + j]
+ * Hot loop (per symbol, right-to-left):
+ *   e     = encode[sym]      — single 8-byte load: freq, lower, cumul, nb_hi
+ *   nb    = (X >= e.lower) ? e.nb_hi : e.nb_hi - 1
+ *   flush nb low bits of X into bitstream (word-at-a-time writer)
+ *   j     = (X >> nb) - e.freq
+ *   X     = encode_state[e.cumul + j]   — stores TABLE_SIZE+slot directly
  *
  * Returns final state (initial state for decoder), or 0 on error.
  * ========================================================================= */
@@ -169,38 +176,177 @@ uint32_t netc_tans_encode(
     if (X < NETC_TANS_TABLE_SIZE) X = NETC_TANS_TABLE_SIZE;
 
     for (size_t i = src_size; i-- > 0; ) {
-        uint8_t  sym = src[i];
-        uint32_t f   = tbl->freq.freq[sym];
-        if (f == 0) return 0;  /* symbol absent from table */
+        uint8_t sym = src[i];
 
-        int      nb_hi = (int)tbl->encode[sym].nb_hi;
-        uint32_t lower = f << (uint32_t)nb_hi;
-        int      nb;
-        uint32_t j;
+        /* Single 8-byte load covers freq, lower, cumul, nb_hi */
+        const netc_tans_encode_entry_t *e = &tbl->encode[sym];
+        uint32_t f     = e->freq;
+        uint32_t lower = e->lower;
+        int      nb_hi = (int)e->nb_hi;
 
-        /* Determine nb: use nb_hi when X in [lower, 2*TABLE_SIZE),
-         * use nb_hi-1 (=nb_lo) when X in [TABLE_SIZE, lower).
-         * Special case: nb_hi == 0 means f == TABLE_SIZE (single symbol). */
-        if (nb_hi == 0 || X >= lower) {
-            nb = nb_hi;
-            j  = (X >> (uint32_t)nb) - f;
-        } else {
-            nb = nb_hi - 1;
-            j  = (X >> (uint32_t)nb) - f;
-        }
+        /* Determine nb: nb_hi when X ∈ [lower, 2*TABLE_SIZE),
+         * nb_hi-1 when X ∈ [TABLE_SIZE, lower).
+         * When nb_hi == 0, f == TABLE_SIZE (single symbol) → nb = 0. */
+        int      nb = (nb_hi == 0 || X >= lower) ? nb_hi : nb_hi - 1;
+        uint32_t j  = (X >> (uint32_t)nb) - f;
 
-        /* Flush nb low bits of X */
+        /* Flush nb low bits of X — word-at-a-time writer */
         if (nb > 0) {
             if (netc_bsw_write(bsw, X & ((1U << (uint32_t)nb) - 1U), nb) != 0)
                 return 0;
         }
 
-        /* Transition: look up the spread slot for the j-th occurrence of sym */
-        X = (uint32_t)NETC_TANS_TABLE_SIZE
-            + (uint32_t)tbl->encode_state[(uint32_t)tbl->encode[sym].cumul + j];
+        /* Transition: encode_state stores TABLE_SIZE+slot directly */
+        X = (uint32_t)tbl->encode_state[(uint32_t)e->cumul + j];
     }
 
     return X;
+}
+
+/* =========================================================================
+ * netc_tans_encode_step — one ANS encode step (inlined for x2 loop)
+ * ========================================================================= */
+
+static NETC_INLINE int tans_encode_step(
+    const netc_tans_table_t *tbl, uint32_t *X, uint8_t sym, netc_bsw_t *bsw)
+{
+    const netc_tans_encode_entry_t *e = &tbl->encode[sym];
+    uint32_t f     = e->freq;
+    uint32_t lower = e->lower;
+    int      nb_hi = (int)e->nb_hi;
+    int      nb    = (nb_hi == 0 || *X >= lower) ? nb_hi : nb_hi - 1;
+    uint32_t j     = (*X >> (uint32_t)nb) - f;
+    if (nb > 0) {
+        if (netc_bsw_write(bsw, *X & ((1U << (uint32_t)nb) - 1U), nb) != 0)
+            return -1;
+    }
+    *X = (uint32_t)tbl->encode_state[(uint32_t)e->cumul + j];
+    return 0;
+}
+
+/* =========================================================================
+ * netc_tans_encode_x2
+ *
+ * Dual-interleaved ANS encoder: processes pairs of symbols with two
+ * independent states (X0, X1), breaking the serial dependency chain and
+ * exposing instruction-level parallelism.
+ *
+ * Encoding order (right-to-left, same as single-state):
+ *   Pass 1 (odd tail if src_size is odd): encode src[0] with X0
+ *   Pass 2 (pairs, right-to-left): encode (src[i], src[i-1]) with (X0, X1)
+ *
+ * Both states emit bits into the same bitstream. The decoder reconstructs
+ * with two interleaved states starting from (state0, state1).
+ *
+ * Returns 0 on success and writes final states to *out_state0, *out_state1.
+ * Returns -1 on error (buffer overflow or invalid table).
+ *
+ * Wire format of the bitstream (read by netc_tans_decode_x2):
+ *   bits are interleaved: X0-bits then X1-bits alternating per pair.
+ *   The decoder must start with state1 then state0 (opposite order).
+ * ========================================================================= */
+
+int netc_tans_encode_x2(
+    const netc_tans_table_t *tbl,
+    const uint8_t           *src,
+    size_t                   src_size,
+    netc_bsw_t              *bsw,
+    uint32_t                *out_state0,
+    uint32_t                *out_state1)
+{
+    if (!tbl || !tbl->valid || !src || !bsw || src_size < 2) return -1;
+    if (!out_state0 || !out_state1) return -1;
+
+    uint32_t X0 = NETC_TANS_TABLE_SIZE;
+    uint32_t X1 = NETC_TANS_TABLE_SIZE;
+
+    size_t i = src_size;
+
+    /* If odd number of symbols, encode the last one with X0 first */
+    if (i & 1u) {
+        i--;
+        if (tans_encode_step(tbl, &X0, src[i], bsw) != 0) return -1;
+    }
+
+    /* Process pairs right-to-left: encode src[i-1] with X1, src[i-2] with X0 */
+    while (i >= 2) {
+        i -= 2;
+        if (tans_encode_step(tbl, &X1, src[i + 1], bsw) != 0) return -1;
+        if (tans_encode_step(tbl, &X0, src[i],     bsw) != 0) return -1;
+    }
+
+    *out_state0 = X0;
+    *out_state1 = X1;
+    return 0;
+}
+
+/* =========================================================================
+ * netc_tans_decode_x2
+ *
+ * Dual-interleaved ANS decoder: reconstructs symbols encoded by
+ * netc_tans_encode_x2, using two independent states.
+ *
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_x2(
+    const netc_tans_table_t *tbl,
+    netc_bsr_t              *bsr,
+    uint8_t                 *dst,
+    size_t                   dst_size,
+    uint32_t                 initial_state0,
+    uint32_t                 initial_state1)
+{
+    if (!tbl || !tbl->valid || !bsr || !dst || dst_size < 2) return -1;
+    if (initial_state0 < NETC_TANS_TABLE_SIZE ||
+        initial_state0 >= 2U * NETC_TANS_TABLE_SIZE) return -1;
+    if (initial_state1 < NETC_TANS_TABLE_SIZE ||
+        initial_state1 >= 2U * NETC_TANS_TABLE_SIZE) return -1;
+
+    uint32_t X0 = initial_state0;
+    uint32_t X1 = initial_state1;
+
+    /* Prefetch both decode entries */
+    NETC_PREFETCH(&tbl->decode[X0 - NETC_TANS_TABLE_SIZE]);
+    NETC_PREFETCH(&tbl->decode[X1 - NETC_TANS_TABLE_SIZE]);
+
+    size_t i = 0;
+
+    /* If odd number of symbols, decode the first one from X0 */
+    if (dst_size & 1u) {
+        const netc_tans_decode_entry_t *d = &tbl->decode[X0 - NETC_TANS_TABLE_SIZE];
+        dst[i++] = d->symbol;
+        int      nb  = d->nb_bits;
+        uint32_t bv  = 0;
+        if (nb > 0 && netc_bsr_read(bsr, nb, &bv) != 0) return -1;
+        X0 = (uint32_t)d->next_state_base + bv;
+        NETC_PREFETCH(&tbl->decode[X0 - NETC_TANS_TABLE_SIZE]);
+    }
+
+    /* Process pairs: decode (X0, X1) into (dst[i], dst[i+1]) */
+    while (i + 1 < dst_size) {
+        const netc_tans_decode_entry_t *d0 = &tbl->decode[X0 - NETC_TANS_TABLE_SIZE];
+        const netc_tans_decode_entry_t *d1 = &tbl->decode[X1 - NETC_TANS_TABLE_SIZE];
+
+        dst[i]     = d0->symbol;
+        dst[i + 1] = d1->symbol;
+
+        int      nb0 = d0->nb_bits, nb1 = d1->nb_bits;
+        uint32_t bv0 = 0, bv1 = 0;
+        if (nb0 > 0 && netc_bsr_read(bsr, nb0, &bv0) != 0) return -1;
+        if (nb1 > 0 && netc_bsr_read(bsr, nb1, &bv1) != 0) return -1;
+
+        X0 = (uint32_t)d0->next_state_base + bv0;
+        X1 = (uint32_t)d1->next_state_base + bv1;
+
+        /* Prefetch next entries */
+        NETC_PREFETCH(&tbl->decode[X0 - NETC_TANS_TABLE_SIZE]);
+        NETC_PREFETCH(&tbl->decode[X1 - NETC_TANS_TABLE_SIZE]);
+
+        i += 2;
+    }
+
+    return 0;
 }
 
 /* =========================================================================
@@ -227,9 +373,14 @@ int netc_tans_decode(
 
     uint32_t X = initial_state;
 
-    for (size_t i = 0; i < dst_size; i++) {
-        if (X < NETC_TANS_TABLE_SIZE || X >= 2U * NETC_TANS_TABLE_SIZE) return -1;
+    /* Validate initial state once — table invariant guarantees all subsequent
+     * transitions stay within [TABLE_SIZE, 2*TABLE_SIZE). */
+    if (X < NETC_TANS_TABLE_SIZE || X >= 2U * NETC_TANS_TABLE_SIZE) return -1;
 
+    /* Prefetch the first decode entry before the loop */
+    NETC_PREFETCH(&tbl->decode[X - NETC_TANS_TABLE_SIZE]);
+
+    for (size_t i = 0; i < dst_size; i++) {
         uint32_t slot = X - NETC_TANS_TABLE_SIZE;
         const netc_tans_decode_entry_t *d = &tbl->decode[slot];
 
@@ -242,6 +393,11 @@ int netc_tans_decode(
         }
 
         X = (uint32_t)d->next_state_base + bits_val;
+
+        /* Prefetch the next decode entry — hides ~4-cycle L1 load latency */
+        if (i + 1 < dst_size) {
+            NETC_PREFETCH(&tbl->decode[X - NETC_TANS_TABLE_SIZE]);
+        }
     }
 
     return 0;

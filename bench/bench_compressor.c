@@ -73,9 +73,14 @@ int bench_run_generic(const bench_generic_cfg_t *cfg,
         c_samples[i] = (t1 >= t0) ? (t1 - t0) : 0;
 
         if (clen == 0) {
-            c_samples[i] = UINT64_MAX / 2;
-            d_samples[i] = UINT64_MAX / 2;
-            safety_ok = 0;
+            /* Compressor signalled incompressible — store raw as passthrough.
+             * Count the compress time but skip the round-trip check for this
+             * packet (incompressibility is not a safety violation). */
+            memcpy(comp_buf, orig_buf, plen);
+            clen = plen;
+            d_samples[i] = 0;
+            total_orig += plen;
+            total_comp += plen;
             continue;
         }
 

@@ -191,3 +191,195 @@ jobs:
           name: benchmark-results
           path: bench_results.json
           retention-days: 30
+
+  # ===========================================================================
+  # Sanitizer — ASan + UBSan full test suite (clang, Linux)
+  # Implements tasks 3.1 and 3.3 of implement-hardening-and-fuzz
+  # ===========================================================================
+  sanitizer-asan:
+    name: Sanitizer (ASan+UBSan, clang)
+    runs-on: ubuntu-22.04
+    needs: [build-linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure with ASan + UBSan
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DNETC_BUILD_TESTS=ON \
+            -DNETC_BUILD_BENCH=OFF \
+            -DNETC_ENABLE_SANITIZERS=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests under ASan+UBSan
+        env:
+          ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: ctest --test-dir build --output-on-failure -j$(nproc) --timeout 120
+
+  # ===========================================================================
+  # Sanitizer — MSan full test suite (clang, Linux)
+  # Implements task 3.2 of implement-hardening-and-fuzz
+  # ===========================================================================
+  sanitizer-msan:
+    name: Sanitizer (MSan, clang)
+    runs-on: ubuntu-22.04
+    needs: [build-linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure with MSan
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DNETC_BUILD_TESTS=ON \
+            -DNETC_BUILD_BENCH=OFF \
+            -DNETC_ENABLE_SANITIZERS=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -O1 -g"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests under MSan
+        env:
+          MSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: ctest --test-dir build --output-on-failure -j$(nproc) --timeout 120
+
+  # ===========================================================================
+  # Fuzz — libFuzzer short run in CI (10 M iterations via -max_total_time)
+  # Implements task 2.4 of implement-hardening-and-fuzz
+  # ===========================================================================
+  fuzz:
+    name: Fuzz (libFuzzer, 60 s per target)
+    runs-on: ubuntu-22.04
+    needs: [build-linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update -q && sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure fuzz targets
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DNETC_BUILD_TESTS=OFF \
+            -DNETC_BUILD_BENCH=OFF \
+            -DNETC_BUILD_FUZZ=ON \
+            -DNETC_ENABLE_SANITIZERS=OFF
+
+      - name: Build fuzz targets
+        run: cmake --build build --target fuzz_decompress fuzz_dict_load fuzz_compress -j$(nproc)
+
+      - name: Create corpus directories
+        run: mkdir -p corpus/decompress corpus/dict_load corpus/compress
+
+      - name: Fuzz fuzz_decompress (60 s)
+        run: |
+          ./build/fuzz_decompress \
+            corpus/decompress \
+            -max_total_time=60 \
+            -max_len=1024 \
+            -print_final_stats=1
+
+      - name: Fuzz fuzz_dict_load (60 s)
+        run: |
+          ./build/fuzz_dict_load \
+            corpus/dict_load \
+            -max_total_time=60 \
+            -max_len=4096 \
+            -print_final_stats=1
+
+      - name: Fuzz fuzz_compress (60 s)
+        run: |
+          ./build/fuzz_compress \
+            corpus/compress \
+            -max_total_time=60 \
+            -max_len=1024 \
+            -print_final_stats=1
+
+      - name: Upload fuzz corpora (for regression)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-corpora
+          path: corpus/
+          retention-days: 90
+
+  # ===========================================================================
+  # Coverage — gcov/lcov gate (≥ 95% line coverage) + HTML report artifact
+  # Implements tasks 4.2 and 4.4 of implement-hardening-and-fuzz
+  # ===========================================================================
+  coverage:
+    name: Coverage (≥ 95% line coverage)
+    runs-on: ubuntu-22.04
+    needs: [build-linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake ninja-build gcc lcov
+
+      - name: Configure with coverage instrumentation
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc \
+            -DNETC_BUILD_TESTS=ON \
+            -DNETC_BUILD_BENCH=OFF \
+            -DNETC_ENABLE_SANITIZERS=OFF \
+            -DNETC_ENABLE_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests (generates .gcda files)
+        run: ctest --test-dir build --output-on-failure -j$(nproc) --timeout 60
+
+      - name: Generate coverage report
+        run: cmake --build build --target coverage
+
+      - name: Check coverage gate (≥ 95% line coverage)
+        run: |
+          # Extract overall line rate from lcov summary
+          LINE_RATE=$(lcov --summary build/coverage_filtered.info 2>&1 \
+            | grep -oP 'lines\.*: \K[0-9.]+(?=%)' | head -1)
+          echo "Line coverage: ${LINE_RATE}%"
+          if [ -z "$LINE_RATE" ]; then
+            echo "ERROR: Could not parse coverage rate"
+            exit 1
+          fi
+          # Use awk for float comparison (bash can't do floats)
+          awk -v rate="$LINE_RATE" 'BEGIN {
+            if (rate + 0 < 95.0) {
+              print "FAIL: line coverage " rate "% is below 95% threshold"
+              exit 1
+            }
+            print "PASS: line coverage " rate "% >= 95%"
+          }'
+
+      - name: Upload HTML coverage report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: build/coverage_html/
+          retention-days: 30

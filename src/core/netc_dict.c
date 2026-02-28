@@ -25,9 +25,11 @@
  * Blob layout constants
  * ========================================================================= */
 
+/* Blob header: magic(4) + version(1) + model_id(1) + ctx_count(1) + pad(1) = 8 bytes */
+#define DICT_HEADER_SIZE  8U
 /* Frequency table section: NETC_CTX_COUNT buckets × 256 × sizeof(uint16) */
-#define DICT_FREQ_BYTES   (NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U) /* 2048 */
-#define DICT_BLOB_SIZE    (4U + 1U + 1U + 2U + DICT_FREQ_BYTES + 4U) /* 2060 */
+#define DICT_FREQ_BYTES   (NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U) /* 16*512=8192 */
+#define DICT_BLOB_SIZE    (DICT_HEADER_SIZE + DICT_FREQ_BYTES + 4U)  /* 8204 */
 #define DICT_CHECKSUM_OFF (DICT_BLOB_SIZE - 4U)
 
 /* =========================================================================
@@ -52,37 +54,22 @@ static void freq_normalize(
     uint64_t        total,
     uint16_t        out[NETC_TANS_SYMBOLS])
 {
-    if (total == 0) {
-        /* No training data for this bucket — uniform distribution */
-        uint16_t base  = (uint16_t)(NETC_TANS_TABLE_SIZE / NETC_TANS_SYMBOLS); /* 16 */
-        uint16_t extra = (uint16_t)(NETC_TANS_TABLE_SIZE % NETC_TANS_SYMBOLS); /* 0 */
-        for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
-            out[s] = (uint16_t)(base + (s < (int)extra ? 1 : 0));
-        }
-        return;
-    }
-
-    /* Count symbols present (freq > 0) */
-    int present = 0;
-    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
-        if (raw[s] > 0) present++;
-    }
-    if (present == 0) present = (int)NETC_TANS_SYMBOLS;
+    /* Laplace smoothing: add 1 to every symbol's count.
+     * This ensures all 256 symbols have freq >= 1 after normalization,
+     * allowing any byte to be entropy-coded regardless of training data.
+     * The smoothed total is total + NETC_TANS_SYMBOLS. */
+    uint64_t smoothed_total = total + (uint64_t)NETC_TANS_SYMBOLS;
 
     uint32_t table_sum = 0;
     int      max_sym   = 0;
     uint32_t max_val   = 0;
 
     for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
-        if (raw[s] == 0) {
-            out[s] = 0;
-            continue;
-        }
-        /* Scale proportionally, floor to at least 1 */
-        uint64_t scaled = (raw[s] * (uint64_t)NETC_TANS_TABLE_SIZE) / total;
+        uint64_t smoothed = raw[s] + 1u;
+        uint64_t scaled   = (smoothed * (uint64_t)NETC_TANS_TABLE_SIZE) / smoothed_total;
         if (scaled == 0) scaled = 1;
         if (scaled > 0xFFFFU) scaled = 0xFFFFU;
-        out[s]    = (uint16_t)scaled;
+        out[s]     = (uint16_t)scaled;
         table_sum += (uint32_t)scaled;
         if (out[s] > max_val) {
             max_val = out[s];
@@ -95,16 +82,11 @@ static void freq_normalize(
         out[max_sym] = (uint16_t)(out[max_sym] + (uint16_t)(NETC_TANS_TABLE_SIZE - table_sum));
     } else if (table_sum > NETC_TANS_TABLE_SIZE) {
         uint32_t excess = table_sum - NETC_TANS_TABLE_SIZE;
-        /* Remove from largest, but keep at least 1 */
         if (out[max_sym] > (uint16_t)excess + 1U) {
             out[max_sym] = (uint16_t)(out[max_sym] - (uint16_t)excess);
         } else {
-            /* Distribute removal across all present symbols */
             for (int s = 0; s < (int)NETC_TANS_SYMBOLS && excess > 0; s++) {
-                if (out[s] > 1) {
-                    out[s]--;
-                    excess--;
-                }
+                if (out[s] > 1) { out[s]--; excess--; }
             }
         }
     }
@@ -136,10 +118,11 @@ netc_result_t netc_dict_train(
         return NETC_ERR_NOMEM;
     }
 
-    d->magic    = NETC_DICT_MAGIC;
-    d->version  = NETC_DICT_VERSION;
-    d->model_id = model_id;
-    d->_pad     = 0;
+    d->magic     = NETC_DICT_MAGIC;
+    d->version   = NETC_DICT_VERSION;
+    d->model_id  = model_id;
+    d->ctx_count = (uint8_t)NETC_CTX_COUNT;
+    d->_pad      = 0;
 
     /* --- Phase 2: accumulate byte frequencies per context bucket --- */
     uint64_t raw[NETC_CTX_COUNT][NETC_TANS_SYMBOLS];
@@ -182,7 +165,8 @@ netc_result_t netc_dict_train(
     netc_write_u32_le(tmp_blob + 0, d->magic);
     tmp_blob[4] = d->version;
     tmp_blob[5] = d->model_id;
-    netc_write_u16_le(tmp_blob + 6, d->_pad);
+    tmp_blob[6] = d->ctx_count;
+    tmp_blob[7] = d->_pad;
 
     /* Serialize frequency tables (uint16 LE, 256 entries × 4 buckets) */
     size_t off = 8;
@@ -219,7 +203,8 @@ netc_result_t netc_dict_save(const netc_dict_t *dict, void **out, size_t *out_si
     netc_write_u32_le(blob + 0, dict->magic);
     blob[4] = dict->version;
     blob[5] = dict->model_id;
-    netc_write_u16_le(blob + 6, dict->_pad);
+    blob[6] = dict->ctx_count;
+    blob[7] = dict->_pad;
 
     size_t off = 8;
     for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
@@ -259,6 +244,10 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
     if (NETC_UNLIKELY(version != NETC_DICT_VERSION)) {
         return NETC_ERR_VERSION;
     }
+    uint8_t stored_ctx_count = b[6];
+    if (NETC_UNLIKELY(stored_ctx_count != (uint8_t)NETC_CTX_COUNT)) {
+        return NETC_ERR_VERSION;
+    }
 
     /* Validate checksum */
     uint32_t stored   = netc_read_u32_le(b + DICT_CHECKSUM_OFF);
@@ -272,11 +261,12 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
         return NETC_ERR_NOMEM;
     }
 
-    d->magic    = magic;
-    d->version  = version;
-    d->model_id = b[5];
-    d->_pad     = netc_read_u16_le(b + 6);
-    d->checksum = stored;
+    d->magic     = magic;
+    d->version   = version;
+    d->model_id  = b[5];
+    d->ctx_count = b[6];
+    d->_pad      = b[7];
+    d->checksum  = stored;
 
     /* Deserialize frequency tables and rebuild tANS decode/encode tables */
     size_t off = 8;

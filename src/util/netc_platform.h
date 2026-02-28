@@ -87,6 +87,23 @@
 #endif
 
 /* =========================================================================
+ * NETC_PREFETCH — software prefetch hint (read, L1 locality)
+ *
+ * Used to hide memory latency in hot loops by issuing a prefetch for the
+ * next iteration's data while the current iteration computes.
+ * No-op on compilers/platforms that don't support it.
+ * ========================================================================= */
+
+#if defined(NETC_COMPILER_MSVC)
+#  include <intrin.h>
+#  define NETC_PREFETCH(ptr) _mm_prefetch((const char *)(ptr), _MM_HINT_T0)
+#elif defined(NETC_COMPILER_GCC) || defined(NETC_COMPILER_CLANG)
+#  define NETC_PREFETCH(ptr) __builtin_prefetch((ptr), 0, 3)
+#else
+#  define NETC_PREFETCH(ptr) ((void)(ptr))
+#endif
+
+/* =========================================================================
  * NETC_STATIC_ASSERT — compile-time assertion
  * ========================================================================= */
 

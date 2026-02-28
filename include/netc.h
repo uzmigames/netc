@@ -28,9 +28,9 @@ extern "C" {
  * ========================================================================= */
 
 #define NETC_VERSION_MAJOR 0
-#define NETC_VERSION_MINOR 1
+#define NETC_VERSION_MINOR 2
 #define NETC_VERSION_PATCH 0
-#define NETC_VERSION_STR   "0.1.0"
+#define NETC_VERSION_STR   "0.2.0"
 
 /* =========================================================================
  * Limits and constants
@@ -78,8 +78,33 @@ typedef enum netc_result {
 /** Uncompressed passthrough — payload is the original bytes verbatim. */
 #define NETC_PKT_FLAG_PASSTHRU 0x04U
 
-/** Dictionary model ID is present in the header (always set in v0.1). */
+/** Dictionary model ID is present in the header (always set in v0.2). */
 #define NETC_PKT_FLAG_DICT_ID  0x08U
+
+/** Multi-region tANS: payload uses per-bucket streams (v0.2+). */
+#define NETC_PKT_FLAG_MREG     0x10U
+
+/** RLE pre-pass was applied before tANS (v0.2+). */
+#define NETC_PKT_FLAG_RLE      0x20U
+
+/** Dual-interleaved ANS (x2): payload has two initial states for ILP decode (v0.3+).
+ *  Single-region wire format: [4B state0][4B state1][bitstream].
+ *  MREG wire format: each region descriptor has 8B {state0 u32, state1 u32}
+ *  followed by 4B bitstream_bytes (descriptor expands from 8B to 12B when X2). */
+#define NETC_PKT_FLAG_X2       0x40U
+
+/** LZ77 back-reference compression (v0.3+).
+ *  Set on NETC_ALG_PASSTHRU packets when the payload is an LZ77 stream
+ *  rather than raw bytes or RLE.  NETC_PKT_FLAG_PASSTHRU is always set
+ *  alongside this flag.
+ *
+ *  Wire format (payload, no external dictionary):
+ *    token stream of variable-length records:
+ *      Literal run:  [0xxxxxxx] len=bits[6:0]+1; followed by len raw bytes
+ *      Back-ref:     [1lllllll][ooooooooo] len=bits[6:0]+3, offset=byte+1
+ *    A literal-run token with len=0 (byte=0x00) encodes 1 literal byte.
+ *    Back-ref offset is 1-based (1–256 bytes back into decoded output). */
+#define NETC_PKT_FLAG_LZ77     0x80U
 
 /* =========================================================================
  * Algorithm identifiers — RFC-001 §9.3

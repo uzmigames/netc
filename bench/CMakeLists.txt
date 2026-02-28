@@ -23,6 +23,12 @@ set(BENCH_SOURCES
     bench_zlib.c
     bench_lz4.c
     bench_zstd.c
+    bench_huffman.c
+    bench_snappy.c
+    bench_oodle.c
+    bench_throughput.c
+    bench_multicore.c
+    bench_baseline.c
     bench_main.c
 )
 
@@ -63,53 +69,111 @@ if(ZLIB_FOUND)
 endif()
 
 # ============================================================================
-# Optional: LZ4 adapter
+# Optional: LZ4 adapter — try vcpkg/CMake config first, then pkg-config
 # ============================================================================
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(LZ4 QUIET liblz4)
-    if(LZ4_FOUND)
-        message(STATUS "bench: lz4 found — building bench_lz4 adapter")
-        target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_LZ4=1)
-        target_include_directories(bench PRIVATE ${LZ4_INCLUDE_DIRS})
-        target_link_libraries(bench PRIVATE ${LZ4_LIBRARIES})
+find_package(lz4 CONFIG QUIET)
+if(lz4_FOUND)
+    message(STATUS "bench: lz4 found (CMake config) — building bench_lz4 adapter")
+    target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_LZ4=1)
+    target_link_libraries(bench PRIVATE lz4::lz4)
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LZ4 QUIET liblz4)
+        if(LZ4_FOUND)
+            message(STATUS "bench: lz4 found (pkg-config) — building bench_lz4 adapter")
+            target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_LZ4=1)
+            target_include_directories(bench PRIVATE ${LZ4_INCLUDE_DIRS})
+            target_link_libraries(bench PRIVATE ${LZ4_LIBRARIES})
+        endif()
     endif()
 endif()
 
 # ============================================================================
-# Optional: Zstd adapter
+# Optional: Zstd adapter — try vcpkg/CMake config first, then pkg-config
 # ============================================================================
-find_package(zstd QUIET)
-if(zstd_FOUND)
-    message(STATUS "bench: zstd found — building bench_zstd adapter")
+find_package(zstd CONFIG QUIET)
+if(zstd_FOUND OR ZSTD_FOUND)
+    message(STATUS "bench: zstd found (CMake config) — building bench_zstd adapter")
     target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_ZSTD=1)
-    target_link_libraries(bench PRIVATE zstd::libzstd_static)
-elseif(PkgConfig_FOUND)
-    pkg_check_modules(ZSTD QUIET libzstd)
-    if(ZSTD_FOUND)
-        message(STATUS "bench: zstd (pkg-config) found")
-        target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_ZSTD=1)
-        target_include_directories(bench PRIVATE ${ZSTD_INCLUDE_DIRS})
-        target_link_libraries(bench PRIVATE ${ZSTD_LIBRARIES})
+    if(TARGET zstd::libzstd_static)
+        target_link_libraries(bench PRIVATE zstd::libzstd_static)
+    elseif(TARGET zstd::libzstd_shared)
+        target_link_libraries(bench PRIVATE zstd::libzstd_shared)
+    endif()
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ZSTD QUIET libzstd)
+        if(ZSTD_FOUND)
+            message(STATUS "bench: zstd found (pkg-config) — building bench_zstd adapter")
+            target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_ZSTD=1)
+            target_include_directories(bench PRIVATE ${ZSTD_INCLUDE_DIRS})
+            target_link_libraries(bench PRIVATE ${ZSTD_LIBRARIES})
+        endif()
+    endif()
+endif()
+
+# ============================================================================
+# Optional: Snappy adapter
+# ============================================================================
+if(PkgConfig_FOUND)
+    pkg_check_modules(SNAPPY QUIET snappy)
+    if(SNAPPY_FOUND)
+        message(STATUS "bench: snappy found — building bench_snappy adapter")
+        target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_SNAPPY=1)
+        target_include_directories(bench PRIVATE ${SNAPPY_INCLUDE_DIRS})
+        target_link_libraries(bench PRIVATE ${SNAPPY_LIBRARIES})
+    endif()
+endif()
+if(NOT SNAPPY_FOUND)
+    find_library(SNAPPY_LIB snappy)
+    if(SNAPPY_LIB)
+        message(STATUS "bench: snappy found via find_library")
+        target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_SNAPPY=1)
+        target_link_libraries(bench PRIVATE ${SNAPPY_LIB})
     endif()
 endif()
 
 # ============================================================================
 # Optional: OodleNetwork adapter (configured by parent CMakeLists.txt)
+# UE5_OODLE_SDK or NETC_OODLE_SDK_PATH env variable must point to Oodle SDK root.
 # ============================================================================
-if(NETC_BENCH_WITH_OODLE AND DEFINED UE5_OODLE_SDK)
-    set(OODLE_INC "${UE5_OODLE_SDK}/include")
-    set(OODLE_LIB_DIR "${UE5_OODLE_SDK}/lib/Win64")
-    if(EXISTS "${OODLE_INC}" AND EXISTS "${OODLE_LIB_DIR}")
-        message(STATUS "bench: OodleNetwork SDK found at ${UE5_OODLE_SDK}")
-        target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_OODLE=1)
-        target_include_directories(bench PRIVATE "${OODLE_INC}")
-        target_link_directories(bench PRIVATE "${OODLE_LIB_DIR}")
-        target_link_libraries(bench PRIVATE oo2net_win64)
+if(NETC_BENCH_WITH_OODLE)
+    # Prefer CMake variable, fall back to env variable
+    if(NOT DEFINED UE5_OODLE_SDK AND DEFINED ENV{NETC_OODLE_SDK_PATH})
+        set(UE5_OODLE_SDK "$ENV{NETC_OODLE_SDK_PATH}")
+    endif()
+
+    if(DEFINED UE5_OODLE_SDK)
+        set(OODLE_INC "${UE5_OODLE_SDK}/include")
+        if(WIN32)
+            set(OODLE_LIB_DIR "${UE5_OODLE_SDK}/lib/Win64")
+            set(OODLE_LIB_NAME "oo2net_win64")
+        else()
+            set(OODLE_LIB_DIR "${UE5_OODLE_SDK}/lib/Linux")
+            set(OODLE_LIB_NAME "oo2netlinux64")
+        endif()
+
+        if(EXISTS "${OODLE_INC}" AND EXISTS "${OODLE_LIB_DIR}")
+            message(STATUS "bench: OodleNetwork SDK found at ${UE5_OODLE_SDK}")
+            target_compile_definitions(bench PRIVATE NETC_BENCH_WITH_OODLE=1)
+            target_include_directories(bench PRIVATE "${OODLE_INC}")
+            target_link_directories(bench PRIVATE "${OODLE_LIB_DIR}")
+            target_link_libraries(bench PRIVATE ${OODLE_LIB_NAME})
+        else()
+            message(WARNING "bench: OodleNetwork SDK path invalid: ${UE5_OODLE_SDK}")
+        endif()
     else()
-        message(WARNING "bench: OodleNetwork SDK path invalid: ${UE5_OODLE_SDK}")
+        message(WARNING "bench: NETC_BENCH_WITH_OODLE=ON but UE5_OODLE_SDK not set")
     endif()
 endif()
+
+# ============================================================================
+# Threads (required for bench_multicore.c on Linux/macOS)
+# ============================================================================
+find_package(Threads REQUIRED)
+target_link_libraries(bench PRIVATE Threads::Threads)
 
 # ============================================================================
 # Install bench binary

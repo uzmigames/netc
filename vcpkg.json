@@ -1,0 +1,9 @@
+{
+  "name": "netc",
+  "version": "0.1.0",
+  "dependencies": [
+    "zlib",
+    "lz4",
+    "zstd"
+  ]
+}

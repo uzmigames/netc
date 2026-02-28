@@ -24,6 +24,8 @@ tmp/
 
 # Build artifacts
 build/
+build-bench/
+build-trace/
 dist/
 out/
 cmake-build-*/
@@ -106,8 +108,10 @@ vcpkg_installed/
 *.VC.db
 *.VC.opendb
 
+
 # Rulebook - ignore runtime data, keep specs and tasks
 /.rulebook/*
 !/.rulebook/specs/
 !/.rulebook/tasks/
+!/.rulebook/tasks/**/*.md
 !/.rulebook/rulebook.json
