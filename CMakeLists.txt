@@ -16,6 +16,7 @@ option(NETC_BUILD_BENCH       "Build benchmark harness"      ON)
 option(NETC_ENABLE_SANITIZERS "Enable ASan + UBSan in Debug" ON)
 option(NETC_BENCH_WITH_OODLE  "Enable OodleNetwork adapter"  OFF)
 option(NETC_BUILD_CSHARP_SDK  "Build native lib for C# SDK"  OFF)
+option(NETC_BUILD_CPP_SDK    "Build C++ SDK wrapper + tests" OFF)
 
 # =============================================================================
 # Compiler warnings and flags
@@ -181,6 +182,65 @@ if(NETC_BUILD_TESTS)
 endif()
 
 # =============================================================================
+# C++ SDK (standalone C++17 wrappers, no UE5 dependency)
+# =============================================================================
+if(NETC_BUILD_CPP_SDK)
+    enable_language(CXX)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+
+    add_library(netc_cpp STATIC
+        sdk/cpp/src/NetcResult.cpp
+        sdk/cpp/src/NetcDict.cpp
+        sdk/cpp/src/NetcContext.cpp
+        sdk/cpp/src/NetcTrainer.cpp
+    )
+    target_include_directories(netc_cpp
+        PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/sdk/cpp/include>
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(netc_cpp PUBLIC netc)
+
+    if(MSVC)
+        target_compile_options(netc_cpp PRIVATE /W4)
+        target_compile_definitions(netc_cpp PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(netc_cpp PRIVATE -Wall -Wextra -Wpedantic -Wno-error)
+    endif()
+
+    # C++ SDK test (uses Unity C test framework)
+    if(NETC_BUILD_TESTS)
+        set(UNITY_SRC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vendor/unity/unity.c")
+        set(UNITY_INC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vendor/unity")
+
+        add_executable(test_cpp_sdk
+            tests/test_cpp_sdk.cpp
+            ${UNITY_SRC_PATH}
+        )
+        target_include_directories(test_cpp_sdk PRIVATE
+            ${UNITY_INC_PATH}
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/sdk/cpp/include
+        )
+        target_link_libraries(test_cpp_sdk PRIVATE netc_cpp netc)
+        set_target_properties(test_cpp_sdk PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+        )
+        set_source_files_properties(${UNITY_SRC_PATH} PROPERTIES LANGUAGE C)
+        add_test(NAME test_cpp_sdk COMMAND test_cpp_sdk)
+        set_tests_properties(test_cpp_sdk PROPERTIES TIMEOUT 30)
+
+        if(MSVC)
+            target_compile_options(test_cpp_sdk PRIVATE /W4 /wd4996)
+        else()
+            target_compile_options(test_cpp_sdk PRIVATE -Wno-error)
+        endif()
+    endif()
+endif()
+
+# =============================================================================
 # Fuzz targets (clang -fsanitize=fuzzer only — not built by default)
 # =============================================================================
 option(NETC_BUILD_FUZZ "Build libFuzzer fuzz targets (requires clang)" OFF)
@@ -334,4 +394,5 @@ message(STATUS "  SIMD flags:      ${NETC_SIMD_FLAGS}")
 message(STATUS "  Build tests:     ${NETC_BUILD_TESTS}")
 message(STATUS "  Build bench:     ${NETC_BUILD_BENCH}")
 message(STATUS "  With Oodle:      ${NETC_BENCH_WITH_OODLE}")
+message(STATUS "  C++ SDK:         ${NETC_BUILD_CPP_SDK}")
 message(STATUS "")
