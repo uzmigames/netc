@@ -26,7 +26,7 @@
 
 ## 5. PGO Build Support
 - [x] 5.1 Add CMake PGO build targets (instrument, profile-run, optimized)
-- [ ] 5.2 Document PGO build workflow in docs/
+- [x] 5.2 Document PGO build workflow in docs/ (docs/pgo-build.md)
 - [ ] 5.3 Benchmark: verify PGO build ≥ 5% faster than non-PGO on WL-001
 
 ## 6. Release Documentation
