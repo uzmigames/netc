@@ -35,6 +35,7 @@ build-clang-baseline/
 build-clang-pgo/
 build-cov/
 build-test-gcc/
+build-*/
 dist/
 out/
 cmake-build-*/
