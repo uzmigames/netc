@@ -11,6 +11,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 
+- **Bigram-PCTX encoder** (`netc_tans_encode_pctx_bigram`, `netc_tans_decode_pctx_bigram`) — per-position context-adaptive tANS that switches tables using BOTH byte offset (bucket) AND previous-byte bigram class. Combines PCTX's per-position entropy specialization with bigram's conditional context modeling. Compressor automatically tries bigram-PCTX alongside unigram PCTX and keeps the smaller output. New compact packet types 0xD0-0xD3 for PCTX+BIGRAM variants. **Result: 1-7% ratio improvement across all workloads. netc now beats OodleNetwork UDP on WL-004 (32B) and WL-005 (512B).**
+- **Adaptive frequency normalization** — replaced Laplace smoothing (add-1 to all 256 symbols) with two-phase floor+proportional normalization. All symbols get freq=1 floor (256 of 4096 slots), remaining 3840 slots distributed proportionally to seen-only symbols. Yields tighter probability estimates by not wasting table resolution on unseen bytes.
+
 - **`netc_ctx_simd_level(ctx)`** — new public API function returning the actual runtime-detected SIMD level (1=generic, 2=sse42, 3=avx2, 4=neon). Independent of `cfg.simd_level` (0 = auto-detect); the returned value is always resolved. Returns 0 for `NULL`. Declared in `netc.h`, implemented in `src/core/netc_ctx.c`.
 - **`netc_simd_level_name(level)`** — new `static inline` helper in `src/simd/netc_simd.h` mapping a `uint8_t` SIMD level to a human-readable C string (`"generic"`, `"sse42"`, `"avx2"`, `"neon"`). Used by bench output and available to embedders.
 

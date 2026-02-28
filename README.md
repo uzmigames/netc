@@ -13,7 +13,7 @@
 
 - **tANS (FSE) entropy coder** — adaptive 12-bit (4096 entries) and 10-bit (1024 entries) tables, branch-free decode, fractional-bit precision
 - **LZP prediction pre-filter** — position-aware order-1 context XOR filter, predicted bytes become 0x00
-- **Bigram context model** — order-1 frequency tables per context bucket
+- **Bigram-PCTX context model** — per-position table switching using both byte offset and previous-byte bigram class. Bigram-PCTX competes with unigram PCTX; smallest wins
 - **Inter-packet delta prediction** — field-class aware (XOR for flags/floats, subtraction for counters)
 - **Compact packet header** — 2B header for packets ≤ 127B, 4B for larger. Opt-in via `NETC_CFG_FLAG_COMPACT_HDR`
 - **ANS state compaction** — 2B tANS state in compact mode (vs. 4B legacy)
@@ -37,7 +37,7 @@ Lower is better (compressed size / original size).
 
 | Compressor | WL-004 (32B) | WL-001 (64B) | WL-002 (128B) | WL-003 (256B) | WL-005 (512B) | Design goal |
 |------------|:------------:|:------------:|:-------------:|:-------------:|:-------------:|-------------|
-| **netc** (compact header) | **0.656** | **0.765** | **0.591** | **0.349** | **0.448** | Network packets |
+| **netc** (compact header) | **0.608** | **0.757** | **0.574** | **0.334** | **0.437** | Network packets |
 | **netc** (legacy 8B header) | 0.906 | 0.890 | 0.638 | 0.373 | — | Network packets |
 | OodleNetwork UDP 2.9.13 | 0.612 | 0.719 | 0.544 | 0.327 | 0.489 | Network packets |
 | OodleNetwork TCP 2.9.13 | 0.524 | 0.732 | 0.555 | 0.336 | 0.415 | Network packets |
@@ -46,7 +46,7 @@ Lower is better (compressed size / original size).
 | LZ4 (fast) | 1.056 | 0.875 | 0.744 | 0.478 | 0.703 | Speed-oriented |
 | Snappy | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | Speed-oriented |
 
-> **Note:** General-purpose compressors (Zstd, zlib, LZ4, Snappy) all **expand** 32B packets (ratio > 1.0) — their framing overhead exceeds savings. netc and OodleNetwork are purpose-built for small network packets. netc beats Oodle UDP on 512B telemetry (0.448 vs 0.489) and stays within 6-9% on 32-128B game packets. The remaining gap is primarily in dictionary quality and prediction efficiency on small payloads.
+> **Note:** General-purpose compressors (Zstd, zlib, LZ4, Snappy) all **expand** 32B packets (ratio > 1.0) — their framing overhead exceeds savings. netc and OodleNetwork are purpose-built for small network packets. netc beats Oodle UDP on 32B and 512B packets, and stays within 2-5% on 64-256B game packets. The remaining gap is primarily in prediction efficiency on medium-sized payloads (64-128B).
 
 ### netc Header Overhead Breakdown
 
@@ -87,13 +87,13 @@ See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for method
 
 | Workload | netc (compact) | Oodle UDP | Gap | Notes |
 |----------|:--------------:|:---------:|:---:|-------|
-| WL-004 32B | 0.656 | 0.612 | 7.2% | Oodle dict quality advantage on tiny packets |
-| WL-001 64B | 0.765 | 0.719 | 6.4% | Close — netc within ~3B per packet |
-| WL-002 128B | 0.591 | 0.544 | 8.6% | Largest gap — Oodle prediction excels here |
-| WL-003 256B | 0.349 | 0.327 | 6.9% | Both excellent — netc within ~6B per packet |
-| WL-005 512B | **0.448** | 0.489 | **-8.4%** | **netc wins** — tANS + LZP outperforms Oodle on larger payloads |
+| WL-004 32B | **0.608** | 0.612 | **-0.7%** | **netc wins** — bigram-PCTX + adaptive normalization |
+| WL-001 64B | 0.757 | 0.719 | 5.3% | Close — netc within ~2.4B per packet |
+| WL-002 128B | 0.574 | 0.544 | 5.5% | Narrowed from 8.6% — bigram-PCTX helps |
+| WL-003 256B | 0.334 | 0.327 | 2.1% | Near-parity — netc within ~1.8B per packet |
+| WL-005 512B | **0.437** | 0.489 | **-10.6%** | **netc wins** — tANS + LZP + bigram-PCTX dominates |
 
-netc beats OodleNetwork UDP on 512B payloads and stays within 6-9% on 32-256B game packets. The gap is primarily in dictionary prediction quality on small packets (32-128B). Throughput optimization is the focus for v1.0 — see `optimize-compress-throughput` task.
+netc beats OodleNetwork UDP on 32B and 512B payloads. Gap narrowed to 2-5% on 64-256B game packets (was 6-9%). Key improvements: bigram-PCTX per-position table switching and adaptive frequency normalization.
 
 ---
 

@@ -33,7 +33,8 @@ OodleNetwork is the **definition of done**: netc is considered functionally comp
     - [10.1 Phase 1+2 Results](#101-phase-12-results-windows-x86_64-msvc-o2-compact-header--delta--dict)
     - [10.2 Speed Mode (FAST_COMPRESS)](#102-speed-mode-netc_cfg_flag_fast_compress-bit-8)
     - [10.3 SIMD Dispatch Fixes](#103-simd-dispatch-fixes-fix-simd-reporting-and-freq-dispatch)
-    - [10.4 Gap to Hard Requirements](#104-gap-to-section-11-hard-requirements)
+    - [10.4 Compression Ratio Measurements](#104-compression-ratio-measurements-improve-compression-ratio-phase1)
+    - [10.5 Gap to Hard Requirements](#105-gap-to-section-11-hard-requirements)
 
 ---
 
@@ -693,7 +694,51 @@ tmp_freq[256]` into `uint64_t raw[b][256]`. On x86 with AVX2, this path processe
 vs. the prior 1 byte/cycle scalar loop — training throughput improvement is proportional to
 average packet size.
 
-### 10.4 Gap to Section 1.1 Hard Requirements
+### 10.4 Compression Ratio Measurements (`improve-compression-ratio-phase1`)
+
+Measured on Windows x86_64, MSVC `/O2`, compact header + delta + dict, seed=42, count=100.
+
+#### Current Ratios (after bigram-PCTX + adaptive normalization)
+
+| Workload | netc (compact) | Oodle UDP | Oodle TCP | Gap vs UDP |
+|----------|:--------------:|:---------:|:---------:|:----------:|
+| WL-004 32B | **0.608** | 0.612 | 0.524 | **-0.7%** (netc wins) |
+| WL-001 64B | 0.757 | 0.719 | 0.732 | +5.3% |
+| WL-002 128B | 0.574 | 0.544 | 0.555 | +5.5% |
+| WL-003 256B | 0.334 | 0.327 | 0.336 | +2.1% |
+| WL-005 512B | **0.437** | 0.489 | 0.415 | **-10.6%** (netc wins) |
+
+#### Improvement Over Previous Baseline
+
+| Workload | Before | After | Δ |
+|----------|:------:|:-----:|:-:|
+| WL-004 32B | 0.656 | 0.608 | **-7.3%** |
+| WL-001 64B | 0.765 | 0.757 | -1.0% |
+| WL-002 128B | 0.591 | 0.574 | **-2.9%** |
+| WL-003 256B | 0.349 | 0.334 | **-4.3%** |
+| WL-005 512B | 0.448 | 0.437 | **-2.5%** |
+
+**Techniques applied:**
+
+1. **Bigram-PCTX** — Per-position table switching using both byte offset (bucket) and
+   previous-byte bigram class. For each byte position, selects
+   `bigram_tables[bucket][class_map[prev_byte]]` instead of `unigram_tables[bucket]`.
+   Falls back to unigram if bigram table is invalid. Competes with unigram PCTX; the
+   smaller output wins. No new dict format needed — reuses existing v5 bigram tables.
+
+2. **Adaptive frequency normalization** — Replaced Laplace smoothing with two-phase
+   floor+proportional: all 256 symbols get floor=1, remaining 3840 slots distributed
+   proportionally to seen-only symbols. Preserves zero-probability avoidance while
+   giving more precision to frequent symbols.
+
+**Compact packet types added:** 0xD0-0xD3 (PCTX+BIGRAM, PCTX+BIGRAM+DELTA,
+PCTX+LZP+BIGRAM, PCTX+LZP+BIGRAM+DELTA).
+
+**Status vs §1.3 OODLE-01 gate:** netc beats Oodle UDP on WL-004 and WL-005.
+Gap narrowed to 2-5% on remaining workloads (was 6-9%). WL-001 64B and WL-002 128B
+remain the primary targets for further ratio improvement.
+
+### 10.5 Gap to Section 1.1 Hard Requirements
 
 Current measured throughput on development hardware (Windows MSVC) is 40-120 MB/s vs the ≥ 2 GB/s
 target in §1.1. The gap is primarily platform and architecture:
