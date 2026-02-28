@@ -400,6 +400,11 @@ netc_result_t netc_decompress_stateless(
         }
     }
 
+    /* Stateless path has no history — delta-encoded packets cannot be decoded. */
+    if (NETC_UNLIKELY(hdr.flags & NETC_PKT_FLAG_DELTA)) {
+        return NETC_ERR_CORRUPT;
+    }
+
     const uint8_t *payload = (const uint8_t *)src + NETC_HEADER_SIZE;
 
     switch (hdr.algorithm) {

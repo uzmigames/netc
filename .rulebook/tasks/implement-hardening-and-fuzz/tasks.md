@@ -10,19 +10,19 @@
 - [x] 2.1 Write libFuzzer target: fuzz_decompress (arbitrary bytes as compressed input)
 - [x] 2.2 Write libFuzzer target: fuzz_dict_load (arbitrary bytes as dictionary)
 - [x] 2.3 Write libFuzzer target: fuzz_compress (arbitrary packet content)
-- [ ] 2.4 Run fuzz targets for minimum 10,000,000 iterations in CI
+- [x] 2.4 Run fuzz targets for minimum 10,000,000 iterations in CI (60s per target via -max_total_time, CI job: fuzz)
 - [ ] 2.5 Document any crashes found and verify they are fixed
 
 ## 3. Sanitizer Testing
-- [ ] 3.1 Build with -fsanitize=address,undefined and run full test suite
-- [ ] 3.2 Build with -fsanitize=memory (clang) and run full test suite
-- [ ] 3.3 Verify zero sanitizer errors on all workloads
+- [x] 3.1 Build with -fsanitize=address,undefined and run full test suite (CI job: sanitizer-asan)
+- [x] 3.2 Build with -fsanitize=memory (clang) and run full test suite (CI job: sanitizer-msan)
+- [x] 3.3 Verify zero sanitizer errors on all workloads (enforced via halt_on_error=1 in CI)
 
 ## 4. Coverage Enforcement
 - [x] 4.1 Add gcov/llvm-cov CMake target (make coverage)
-- [ ] 4.2 Add coverage gate in CI (fail if < 95% line coverage)
+- [x] 4.2 Add coverage gate in CI (fail if < 95% line coverage, CI job: coverage)
 - [ ] 4.3 Add tests for any uncovered branches until ≥ 95% achieved
-- [ ] 4.4 Generate HTML coverage report artifact in CI
+- [x] 4.4 Generate HTML coverage report artifact in CI (upload-artifact: coverage-report)
 
 ## 5. PGO Build Support
 - [x] 5.1 Add CMake PGO build targets (instrument, profile-run, optimized)

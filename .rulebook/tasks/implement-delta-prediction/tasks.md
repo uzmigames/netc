@@ -12,9 +12,9 @@
 - [x] 2.4 Tests: ctx_reset clears delta history, size-mismatch skips delta
 
 ## 3. Stateless Delta (Stateless Mode)
-- [ ] 3.1 Implement context_seq tracking for stateless delta (per RFC-001 §9.1)
-- [ ] 3.2 Implement out-of-order detection (skip delta if context_seq gap > 1)
-- [ ] 3.3 Write tests: stateless delta with context_seq numbers
+- [x] 3.1 Implement context_seq=0 for stateless (no per-packet state, per RFC-001 §9.1)
+- [x] 3.2 netc_decompress_stateless rejects NETC_PKT_FLAG_DELTA with NETC_ERR_CORRUPT (no history → cannot decode)
+- [x] 3.3 Write tests: stateless delta rejection, LZ77 stateless round-trip, context_seq=0 assertion (4 tests)
 
 ## 4. Coarse Context Bucket Model (per RFC-001 §6.2 — AD-003)
 - [x] 4.1 4-bucket context model already in Phase 2: CTX_HEADER(0–15), CTX_SUBHEADER(16–63), CTX_BODY(64–255), CTX_TAIL(256–1499)

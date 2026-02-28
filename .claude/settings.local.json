@@ -141,7 +141,12 @@
       "Bash(do echo -n \"$exe: \")",
       "Bash(./build-bench/bench/Release/bench.exe --compressor=netc --workload=WL-004 --workload=WL-005 --workload=WL-006 --workload=WL-008 --count=50000 --train=10000 --format=table)",
       "Bash(git add include/netc.h src/algo/netc_tans.c src/algo/netc_tans.h src/core/netc_compress.c src/core/netc_decompress.c src/core/netc_dict.c src/core/netc_internal.h src/util/netc_bitstream.h src/util/netc_platform.h tests/test_bitstream.c tests/test_compress.c tests/test_dict.c tests/test_passthru.c bench/CMakeLists.txt bench/bench_compressor.c bench/bench_main.c bench/bench_zstd.c bench/bench_baseline.c bench/bench_baseline.h bench/bench_huffman.c bench/bench_huffman.h bench/bench_multicore.c bench/bench_multicore.h bench/bench_oodle.c bench/bench_oodle.h bench/bench_snappy.c bench/bench_snappy.h bench/bench_throughput.c bench/bench_throughput.h .github/workflows/ci.yml AGENTS.md .gitignore vcpkg.json docs/pgo-build.md)",
-      "Bash(git add .)"
+      "Bash(git add .)",
+      "mcp__rulebook__rulebook_task_update",
+      "mcp__rulebook__rulebook_task_archive",
+      "Bash(cmake --build build-bench --config Release --target test_compress)",
+      "Bash(git add src/core/netc_compress.c src/core/netc_decompress.c tests/test_compress.c .rulebook/tasks/implement-delta-prediction/tasks.md .rulebook/tasks/implement-hardening-and-fuzz/tasks.md)",
+      "Bash(git add -A)"
     ]
   }
 }

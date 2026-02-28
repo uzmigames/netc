@@ -686,23 +686,69 @@ netc_result_t netc_compress_stateless(
         int     used_mreg  = 0;
         int     used_x2    = 0;
 
-        if (try_tans_compress(dict, (const uint8_t *)src, src_size,
-                              payload, payload_cap,
-                              &compressed_payload, &used_mreg, &used_x2) == 0) {
-            if (compressed_payload < src_size) {
-                uint8_t extra_flags = (used_mreg ? NETC_PKT_FLAG_MREG : 0)
-                                    | (used_x2   ? NETC_PKT_FLAG_X2   : 0);
+        int tans_ok = (try_tans_compress(dict, (const uint8_t *)src, src_size,
+                                         payload, payload_cap,
+                                         &compressed_payload, &used_mreg, &used_x2) == 0
+                       && compressed_payload < src_size);
 
+        if (tans_ok) {
+            /* tANS succeeded — check if LZ77 beats it (ratio > 0.5 threshold).
+             * Stateless has no arena; use a small stack buffer capped at 1024B.
+             * For larger packets only tANS is tried (stack budget constraint). */
+            if (compressed_payload * 2 > src_size && src_size <= 1024) {
+                uint8_t lz_buf[1024];
+                size_t lz_len = lz77_encode((const uint8_t *)src, src_size,
+                                            lz_buf, sizeof(lz_buf));
+                if (lz_len < compressed_payload && lz_len < src_size &&
+                    NETC_HEADER_SIZE + lz_len <= dst_cap) {
+                    memcpy(payload, lz_buf, lz_len);
+                    netc_pkt_header_t hdr;
+                    hdr.original_size   = (uint16_t)src_size;
+                    hdr.compressed_size = (uint16_t)lz_len;
+                    hdr.flags           = NETC_PKT_FLAG_DICT_ID
+                                        | NETC_PKT_FLAG_LZ77
+                                        | NETC_PKT_FLAG_PASSTHRU;
+                    hdr.algorithm       = NETC_ALG_PASSTHRU;
+                    hdr.model_id        = dict->model_id;
+                    hdr.context_seq     = 0;
+                    netc_hdr_write(dst, &hdr);
+                    *dst_size = NETC_HEADER_SIZE + lz_len;
+                    return NETC_OK;
+                }
+            }
+
+            /* tANS wins */
+            uint8_t extra_flags = (used_mreg ? NETC_PKT_FLAG_MREG : 0)
+                                | (used_x2   ? NETC_PKT_FLAG_X2   : 0);
+            netc_pkt_header_t hdr;
+            hdr.original_size   = (uint16_t)src_size;
+            hdr.compressed_size = (uint16_t)compressed_payload;
+            hdr.flags           = NETC_PKT_FLAG_DICT_ID | extra_flags;
+            hdr.algorithm       = NETC_ALG_TANS;
+            hdr.model_id        = dict->model_id;
+            hdr.context_seq     = 0;
+            netc_hdr_write(dst, &hdr);
+            *dst_size = NETC_HEADER_SIZE + compressed_payload;
+            return NETC_OK;
+        }
+
+        /* tANS failed — try LZ77 directly into payload */
+        if (src_size > 0) {
+            size_t lz_len = lz77_encode((const uint8_t *)src, src_size,
+                                        payload, payload_cap);
+            if (lz_len != (size_t)-1 && lz_len < src_size &&
+                NETC_HEADER_SIZE + lz_len <= dst_cap) {
                 netc_pkt_header_t hdr;
                 hdr.original_size   = (uint16_t)src_size;
-                hdr.compressed_size = (uint16_t)compressed_payload;
-                hdr.flags           = NETC_PKT_FLAG_DICT_ID | extra_flags;
-                hdr.algorithm       = NETC_ALG_TANS;
+                hdr.compressed_size = (uint16_t)lz_len;
+                hdr.flags           = NETC_PKT_FLAG_DICT_ID
+                                    | NETC_PKT_FLAG_LZ77
+                                    | NETC_PKT_FLAG_PASSTHRU;
+                hdr.algorithm       = NETC_ALG_PASSTHRU;
                 hdr.model_id        = dict->model_id;
                 hdr.context_seq     = 0;
-
                 netc_hdr_write(dst, &hdr);
-                *dst_size = NETC_HEADER_SIZE + compressed_payload;
+                *dst_size = NETC_HEADER_SIZE + lz_len;
                 return NETC_OK;
             }
         }

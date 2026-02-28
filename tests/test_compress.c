@@ -721,6 +721,102 @@ void test_compress_lz77_flag_set(void) {
 }
 
 /* =========================================================================
+ * Stateless delta rejection tests
+ *
+ * netc_decompress_stateless must reject packets with NETC_PKT_FLAG_DELTA
+ * because it has no history to reconstruct the original bytes.
+ * ========================================================================= */
+
+/* Helper: craft a fake TANS packet header with DELTA flag set */
+static void craft_delta_packet(uint8_t *buf, size_t buf_cap,
+                                size_t payload_size, size_t *out_size)
+{
+    TEST_ASSERT_GREATER_OR_EQUAL(8 + payload_size, buf_cap);
+    /* original_size = payload_size (LE) */
+    buf[0] = (uint8_t)(payload_size & 0xFF);
+    buf[1] = (uint8_t)(payload_size >> 8);
+    /* compressed_size = payload_size */
+    buf[2] = buf[0]; buf[3] = buf[1];
+    /* flags = PASSTHRU | DELTA | DICT_ID */
+    buf[4] = NETC_PKT_FLAG_PASSTHRU | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID;
+    buf[5] = NETC_ALG_PASSTHRU;
+    buf[6] = 1; /* model_id = 1 */
+    buf[7] = 0; /* context_seq */
+    memset(buf + 8, 0x42, payload_size);
+    *out_size = 8 + payload_size;
+}
+
+/* Stateless decompressor must reject DELTA-flagged packets */
+void test_decompress_stateless_rejects_delta_flag(void) {
+    uint8_t cbuf[256];
+    size_t  csz = 0;
+    craft_delta_packet(cbuf, sizeof(cbuf), 64, &csz);
+
+    uint8_t dbuf[128];
+    size_t  dsz = 0;
+    netc_result_t r = netc_decompress_stateless(s_dict, cbuf, csz,
+                                                dbuf, sizeof(dbuf), &dsz);
+    TEST_ASSERT_EQUAL_INT(NETC_ERR_CORRUPT, r);
+}
+
+/* Stateless compress never sets DELTA flag */
+void test_compress_stateless_never_sets_delta(void) {
+    uint8_t src[128];
+    /* Use highly repetitive data so tANS definitely activates */
+    memset(src, 0xCC, sizeof(src));
+
+    uint8_t cbuf[256];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress_stateless(s_dict, src, sizeof(src),
+                                cbuf, sizeof(cbuf), &csz));
+    /* DELTA flag must NOT be set in any stateless compressed packet */
+    TEST_ASSERT_EQUAL_UINT8(0, cbuf[4] & NETC_PKT_FLAG_DELTA);
+}
+
+/* Stateless LZ77 round-trip: repetitive data, no dict (no-dict ctx path uses
+ * stateless functions indirectly; here we test the stateless API directly) */
+void test_compress_stateless_lz77_roundtrip_repetitive(void) {
+    /* Build a small no-dict context to get a no-dict trained dict —
+     * actually use a corpus of all-zeros packets to train s_dict,
+     * but s_dict is already trained.  The LZ77 path in stateless
+     * fires when tANS ratio > 0.5.  Use repeating data that tANS
+     * compresses poorly (not in the training corpus). */
+    uint8_t src[128];
+    /* Alternating 0x00/0xFF — likely not in training corpus → tANS may fail */
+    for (int i = 0; i < 128; i++) src[i] = (i & 1) ? 0xFF : 0x00;
+
+    uint8_t cbuf[256];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress_stateless(s_dict, src, sizeof(src),
+                                cbuf, sizeof(cbuf), &csz));
+
+    /* Round-trip must reconstruct original exactly */
+    uint8_t dbuf[128];
+    size_t  dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress_stateless(s_dict, cbuf, csz,
+                                  dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(src), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(src, dbuf, sizeof(src));
+}
+
+/* Stateless: context_seq is always 0 (no per-packet state) */
+void test_compress_stateless_context_seq_is_zero(void) {
+    uint8_t src[64];
+    memset(src, 0xAA, sizeof(src));
+
+    uint8_t cbuf[256];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress_stateless(s_dict, src, sizeof(src),
+                                cbuf, sizeof(cbuf), &csz));
+    /* Byte 7 = context_seq, must be 0 for stateless */
+    TEST_ASSERT_EQUAL_UINT8(0, cbuf[7]);
+}
+
+/* =========================================================================
  * main
  * ========================================================================= */
 
@@ -778,6 +874,12 @@ int main(void) {
 
     /* Statistics */
     RUN_TEST(test_compress_stats_updated);
+
+    /* Stateless delta rejection */
+    RUN_TEST(test_decompress_stateless_rejects_delta_flag);
+    RUN_TEST(test_compress_stateless_never_sets_delta);
+    RUN_TEST(test_compress_stateless_lz77_roundtrip_repetitive);
+    RUN_TEST(test_compress_stateless_context_seq_is_zero);
 
     return UNITY_END();
 }
