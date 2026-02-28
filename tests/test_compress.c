@@ -1117,6 +1117,153 @@ void test_bigram_delta_repetitive_roundtrip(void)
 }
 
 /* =========================================================================
+ * Bigram-PCTX tests — per-position bigram table switching
+ * ========================================================================= */
+
+/* Bigram-PCTX round-trip with compact headers — various packet sizes.
+ * Tests the full encode/decode path including new 0xD0-0xD3 compact types. */
+void test_bigram_pctx_roundtrip_compact(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM
+              | NETC_CFG_FLAG_COMPACT_HDR;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    /* Test multiple packet sizes to exercise different bucket ranges:
+     * 32B (buckets 0-3), 64B (0-5), 128B (0-7), 256B (0-9), 512B (0-11). */
+    static const size_t sizes[] = { 32, 64, 128, 256, 512 };
+    for (int si = 0; si < 5; si++) {
+        size_t sz = sizes[si];
+        uint8_t src[512];
+        /* Structured pattern: alternating byte values to give bigram context */
+        for (size_t i = 0; i < sz; i++)
+            src[i] = (uint8_t)((i * 7 + i / 3) & 0xFF);
+
+        uint8_t cbuf[1024];
+        size_t  csz = 0;
+        TEST_ASSERT_EQUAL_INT(NETC_OK,
+            netc_compress(ctx_c, src, sz, cbuf, sizeof(cbuf), &csz));
+
+        uint8_t dbuf[512];
+        size_t  dsz = 0;
+        TEST_ASSERT_EQUAL_INT(NETC_OK,
+            netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+        TEST_ASSERT_EQUAL_UINT(sz, dsz);
+        TEST_ASSERT_EQUAL_MEMORY(src, dbuf, sz);
+    }
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* Bigram-PCTX round-trip with delta encoding enabled.
+ * Tests the DELTA+BIGRAM combination (compact type 0xD1/0xD3). */
+void test_bigram_pctx_delta_roundtrip(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM
+              | NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_COMPACT_HDR;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    /* Send two 128B packets with slight differences (delta should help) */
+    uint8_t pkt1[128], pkt2[128];
+    for (int i = 0; i < 128; i++) {
+        pkt1[i] = (uint8_t)(i * 3);
+        pkt2[i] = (uint8_t)(i * 3 + (i < 10 ? 1 : 0));
+    }
+
+    uint8_t cbuf[512];
+    uint8_t dbuf[128];
+    size_t  csz = 0, dsz = 0;
+
+    /* First packet: no delta (no previous) */
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_c, pkt1, 128, cbuf, sizeof(cbuf), &csz));
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(128, dsz);
+    TEST_ASSERT_EQUAL_MEMORY(pkt1, dbuf, 128);
+
+    /* Second packet: delta should fire (same-size previous) */
+    csz = 0; dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_c, pkt2, 128, cbuf, sizeof(cbuf), &csz));
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(128, dsz);
+    TEST_ASSERT_EQUAL_MEMORY(pkt2, dbuf, 128);
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* Bigram-PCTX round-trip with multi-packet sequence.
+ * Verifies stability across a long sequence of packets with varying content. */
+void test_bigram_pctx_multi_packet_roundtrip(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM
+              | NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_COMPACT_HDR;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    for (int p = 0; p < 20; p++) {
+        uint8_t src[64];
+        for (int i = 0; i < 64; i++)
+            src[i] = (uint8_t)(p * 13 + i * 5 + (i & 3));
+
+        uint8_t cbuf[512];
+        uint8_t dbuf[64];
+        size_t  csz = 0, dsz = 0;
+        TEST_ASSERT_EQUAL_INT(NETC_OK,
+            netc_compress(ctx_c, src, 64, cbuf, sizeof(cbuf), &csz));
+        TEST_ASSERT_EQUAL_INT(NETC_OK,
+            netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+        TEST_ASSERT_EQUAL_UINT(64, dsz);
+        TEST_ASSERT_EQUAL_MEMORY(src, dbuf, 64);
+    }
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* Bigram-PCTX round-trip without compact headers (legacy 8B header path). */
+void test_bigram_pctx_legacy_header_roundtrip(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    uint8_t src[256];
+    for (int i = 0; i < 256; i++)
+        src[i] = (uint8_t)(i ^ (i >> 3));
+
+    uint8_t cbuf[1024];
+    uint8_t dbuf[256];
+    size_t  csz = 0, dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_c, src, 256, cbuf, sizeof(cbuf), &csz));
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(256, dsz);
+    TEST_ASSERT_EQUAL_MEMORY(src, dbuf, 256);
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* =========================================================================
  * main
  * ========================================================================= */
 
@@ -1190,6 +1337,12 @@ int main(void) {
     RUN_TEST(test_bigram_non_bigram_packet_decompresses_on_bigram_ctx);
     RUN_TEST(test_bigram_mreg_roundtrip);
     RUN_TEST(test_bigram_delta_repetitive_roundtrip);
+
+    /* Bigram-PCTX (per-position bigram table switching) */
+    RUN_TEST(test_bigram_pctx_roundtrip_compact);
+    RUN_TEST(test_bigram_pctx_delta_roundtrip);
+    RUN_TEST(test_bigram_pctx_multi_packet_roundtrip);
+    RUN_TEST(test_bigram_pctx_legacy_header_roundtrip);
 
     return UNITY_END();
 }
