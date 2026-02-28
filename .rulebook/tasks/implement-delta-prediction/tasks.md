@@ -31,5 +31,5 @@
 
 ## 6. Validation
 - [x] 6.2 Round-trip tests: multi-packet sequences (10 packets) all round-trip correctly
-- [ ] 6.1 Benchmark: verify delta improves compression ratio ≥ 10% on WL-001 vs no-delta (Phase 5)
-- [ ] 6.3 Verify 95%+ test coverage on delta module (Phase 5)
+- [ ] 6.1 Benchmark: verify delta improves compression ratio ≥ 10% on WL-001 vs no-delta (deferred: WL-001 diverse residuals have >4 distinct values → falls back to tANS not LZ77; requires bigram table 4.3)
+- [ ] 6.3 Verify 95%+ test coverage on delta module (deferred: requires gcov on Linux CI — coverage job already configured)

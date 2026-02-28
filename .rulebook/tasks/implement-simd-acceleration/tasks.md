@@ -30,6 +30,6 @@
 
 ## 6. Benchmarks and Validation
 - [x] 6.3 Verified output identical across generic, SSE4.2, AVX2 paths (22 tests, all passing)
-- [ ] 6.1 Benchmark: verify AVX2 path achieves ≥ 3 GB/s on WL-001 (Phase 5)
-- [ ] 6.2 Benchmark: verify Mpps (decompress, 64B) ≥ 20 with SIMD (Phase 5)
-- [ ] 6.4 Verify 95%+ test coverage on simd module (Phase 5)
+- [ ] 6.1 Benchmark: verify AVX2 path achieves ≥ 3 GB/s on WL-001 (deferred: requires dedicated AVX2 server; current dev machine: 340 MB/s decompress)
+- [ ] 6.2 Benchmark: verify Mpps (decompress, 64B) ≥ 20 with SIMD (deferred: current 5.4 Mpps on dev machine)
+- [ ] 6.4 Verify 95%+ test coverage on simd module (deferred: requires gcov on Linux CI)
