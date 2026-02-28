@@ -8,6 +8,7 @@
 
 #include "bench_netc.h"
 #include "bench_corpus.h"
+#include "../src/simd/netc_simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -55,15 +56,8 @@ int bench_netc_init(bench_netc_t *n,
     if (!n->comp_buf) return -1;
     n->comp_buf_cap = cap;
 
-    /* Build context name */
-    const char *mode  = n->stateless ? "stateless" : "stateful";
-    const char *delta = (flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
-    const char *dct   = dict ? "+dict" : "";
-    const char *fast  = (flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
-    snprintf(n->name, sizeof(n->name), "netc/%s%s%s simd=%u%s",
-             mode, delta, dct, simd_level, fast);
-
-    /* Create enc+dec context pair for stateful mode */
+    /* Create enc+dec context pair for stateful mode (must come before name build
+     * so we can query the actual detected SIMD level from the context). */
     if (!n->stateless) {
         if (create_ctx_pair(n) != 0) {
             free(n->comp_buf);
@@ -71,6 +65,15 @@ int bench_netc_init(bench_netc_t *n,
             return -1;
         }
     }
+
+    /* Build context name — use actual detected SIMD level, not configured value */
+    const char *mode  = n->stateless ? "stateless" : "stateful";
+    const char *delta = (flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
+    const char *dct   = dict ? "+dict" : "";
+    const char *fast  = (flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
+    uint8_t     det   = n->enc_ctx ? netc_ctx_simd_level(n->enc_ctx) : simd_level;
+    snprintf(n->name, sizeof(n->name), "netc/%s%s%s simd=%s%s",
+             mode, delta, dct, netc_simd_level_name(det), fast);
 
     return 0;
 }
@@ -119,12 +122,13 @@ int bench_netc_train(bench_netc_t *n,
         if (create_ctx_pair(n) != 0) return -1;
     }
 
-    /* Update name to reflect dict */
+    /* Update name to reflect dict — use actual detected SIMD level */
     const char *mode  = n->stateless ? "stateless" : "stateful";
     const char *delta = (n->flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
     const char *fast  = (n->flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
-    snprintf(n->name, sizeof(n->name), "netc/%s%s+dict simd=%u%s",
-             mode, delta, (unsigned)n->simd_level, fast);
+    uint8_t     det   = n->enc_ctx ? netc_ctx_simd_level(n->enc_ctx) : n->simd_level;
+    snprintf(n->name, sizeof(n->name), "netc/%s%s+dict simd=%s%s",
+             mode, delta, netc_simd_level_name(det), fast);
 
     return 0;
 }

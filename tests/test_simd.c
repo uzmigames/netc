@@ -21,6 +21,12 @@
  *   3.4 AVX2 delta encode == generic delta encode (if AVX2 available)
  *   3.5 AVX2 delta decode == generic delta decode (if AVX2 available)
  *   3.6 AVX2 freq_count == generic freq_count (if AVX2 available)
+ *   3.7 SIMD dispatch freq_count matches scalar for each bucket segment (dict training pattern)
+ *
+ * ## 7. netc_ctx_simd_level() accessor
+ *   7.1 Returns resolved level (not 0) for auto-created context
+ *   7.2 Returns 0 for NULL context
+ *   7.3 Returns GENERIC level when context forced to GENERIC
  *
  * ## 4. Unaligned buffer safety
  *   4.1 SSE4.2 delta encode on buffer starting at odd address — no fault
@@ -307,6 +313,51 @@ void test_avx2_freq_matches_generic(void) {
             TEST_FAIL_MESSAGE(msg);
             return;
         }
+    }
+}
+
+void test_simd_freq_count_matches_scalar(void) {
+    /* 3.7 SIMD dispatch freq_count matches scalar for each bucket segment.
+     * Verifies the per-bucket iteration pattern used in netc_dict_train(). */
+    static const uint32_t bucket_end[16] = {
+           8,   16,   24,   32,   48,   64,   96,  128,
+         192,  256,  384,  512, 1024, 4096, 16384, 65536
+    };
+
+    netc_simd_ops_t simd_ops;
+    netc_simd_ops_init(&simd_ops, NETC_SIMD_LEVEL_AUTO);
+
+    const uint8_t *pkt = s_curr;  /* PKT_SIZE = 512 bytes */
+    uint32_t seg_start = 0;
+
+    for (uint32_t b = 0; b < 16; b++) {
+        if (seg_start >= PKT_SIZE) break;
+        uint32_t seg_end = bucket_end[b];
+        if (seg_end > PKT_SIZE) seg_end = PKT_SIZE;
+        uint32_t seg_len = seg_end - seg_start;
+
+        /* Scalar reference */
+        uint32_t scalar_freq[256] = {0};
+        for (uint32_t i = 0; i < seg_len; i++) {
+            scalar_freq[pkt[seg_start + i]]++;
+        }
+
+        /* SIMD dispatch path */
+        uint32_t simd_freq[256] = {0};
+        simd_ops.freq_count(pkt + seg_start, (size_t)seg_len, simd_freq);
+
+        for (int sym = 0; sym < 256; sym++) {
+            if (scalar_freq[sym] != simd_freq[sym]) {
+                char msg[128];
+                snprintf(msg, sizeof(msg),
+                         "bucket %u [%u,%u): sym 0x%02X scalar=%u simd=%u",
+                         b, seg_start, seg_end, sym,
+                         scalar_freq[sym], simd_freq[sym]);
+                TEST_FAIL_MESSAGE(msg);
+                return;
+            }
+        }
+        seg_start = seg_end;
     }
 }
 
@@ -612,6 +663,42 @@ void test_simd_cross_path_boundary_packet(void) {
 }
 
 /* =========================================================================
+ * 7. netc_ctx_simd_level() accessor
+ * ========================================================================= */
+
+void test_ctx_simd_level_auto_resolved(void) {
+    /* 7.1 Auto context: reported level is a valid non-zero level, not the raw cfg value (0) */
+    netc_ctx_t *ctx = make_ctx(NETC_SIMD_LEVEL_AUTO, 0);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    uint8_t level = netc_ctx_simd_level(ctx);
+    TEST_ASSERT_TRUE_MESSAGE(
+        level == NETC_SIMD_LEVEL_GENERIC ||
+        level == NETC_SIMD_LEVEL_SSE42   ||
+        level == NETC_SIMD_LEVEL_AVX2    ||
+        level == NETC_SIMD_LEVEL_NEON,
+        "auto ctx: simd_level should be a resolved level, not 0"
+    );
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, level,
+        "auto ctx: simd_level must not be 0 (unresolved auto)");
+
+    netc_ctx_destroy(ctx);
+}
+
+void test_ctx_simd_level_null_returns_zero(void) {
+    /* 7.2 NULL ctx → 0 */
+    TEST_ASSERT_EQUAL_UINT8(0, netc_ctx_simd_level(NULL));
+}
+
+void test_ctx_simd_level_generic_ctx(void) {
+    /* 7.3 Context forced to GENERIC → level field == NETC_SIMD_LEVEL_GENERIC */
+    netc_ctx_t *ctx = make_ctx(NETC_SIMD_LEVEL_GENERIC, 0);
+    TEST_ASSERT_NOT_NULL(ctx);
+    TEST_ASSERT_EQUAL_UINT8(NETC_SIMD_LEVEL_GENERIC, netc_ctx_simd_level(ctx));
+    netc_ctx_destroy(ctx);
+}
+
+/* =========================================================================
  * main
  * ========================================================================= */
 
@@ -636,6 +723,7 @@ int main(void) {
     RUN_TEST(test_avx2_delta_matches_generic);
     RUN_TEST(test_sse42_freq_matches_generic);
     RUN_TEST(test_avx2_freq_matches_generic);
+    RUN_TEST(test_simd_freq_count_matches_scalar);
 
     /* 3b. CRC32 cross-path consistency */
     RUN_TEST(test_sse42_crc32_matches_generic);
@@ -655,6 +743,11 @@ int main(void) {
     RUN_TEST(test_simd_graceful_fallback);
     RUN_TEST(test_simd_cross_path_small_packet);
     RUN_TEST(test_simd_cross_path_boundary_packet);
+
+    /* 7. netc_ctx_simd_level() accessor */
+    RUN_TEST(test_ctx_simd_level_auto_resolved);
+    RUN_TEST(test_ctx_simd_level_null_returns_zero);
+    RUN_TEST(test_ctx_simd_level_generic_ctx);
 
     return UNITY_END();
 }

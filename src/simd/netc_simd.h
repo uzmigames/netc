@@ -85,6 +85,21 @@ typedef struct {
 } netc_simd_ops_t;
 
 /* =========================================================================
+ * Level name helper
+ * ========================================================================= */
+
+/** Map a SIMD level constant to its human-readable name string. */
+static inline const char *netc_simd_level_name(uint8_t level) {
+    switch (level) {
+        case NETC_SIMD_LEVEL_GENERIC: return "generic";
+        case NETC_SIMD_LEVEL_SSE42:   return "sse42";
+        case NETC_SIMD_LEVEL_AVX2:    return "avx2";
+        case NETC_SIMD_LEVEL_NEON:    return "neon";
+        default:                      return "auto";
+    }
+}
+
+/* =========================================================================
  * Capability detection
  * ========================================================================= */
 

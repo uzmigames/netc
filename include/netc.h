@@ -272,6 +272,15 @@ void netc_ctx_reset(netc_ctx_t *ctx);
  */
 netc_result_t netc_ctx_stats(const netc_ctx_t *ctx, netc_stats_t *out);
 
+/**
+ * Return the actual SIMD level selected at context creation time.
+ * Independent of cfg.simd_level (0 = auto — the level here is always resolved).
+ *
+ * Values: 1=generic, 2=sse42, 3=avx2, 4=neon.
+ * Returns 0 if ctx is NULL.
+ */
+uint8_t netc_ctx_simd_level(const netc_ctx_t *ctx);
+
 /* =========================================================================
  * Dictionary management — RFC-001 §10.2
  * ========================================================================= */

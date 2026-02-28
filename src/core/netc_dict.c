@@ -31,6 +31,7 @@
 
 #include "netc_internal.h"
 #include "../util/netc_crc32.h"
+#include "../simd/netc_simd.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -174,15 +175,41 @@ netc_result_t netc_dict_train(
     memset(raw,    0, sizeof(raw));
     memset(totals, 0, sizeof(totals));
 
+    /* Bucket boundary table: bucket b covers byte positions [bucket_start[b], bucket_start[b+1]).
+     * Mirrors the netc_ctx_bucket() LUT thresholds exactly. */
+    static const uint32_t bucket_end[NETC_CTX_COUNT] = {
+           8,   16,   24,   32,   48,   64,   96,  128,
+         192,  256,  384,  512, 1024, 4096, 16384, 65536
+    };
+
+    /* Use SIMD-dispatched freq_count for each contiguous bucket range within the packet.
+     * tmp_freq accumulates into a uint32_t[256] scratch buffer (fits in L1 cache);
+     * results are promoted to the uint64_t raw table after each bucket. */
+    netc_simd_ops_t simd_ops;
+    netc_simd_ops_init(&simd_ops, NETC_SIMD_LEVEL_AUTO);
+
+    uint32_t tmp_freq[NETC_TANS_SYMBOLS];
+
     for (size_t p = 0; p < count; p++) {
         if (packets[p] == NULL || sizes[p] == 0) continue;
         size_t pkt_size = sizes[p];
         if (pkt_size > NETC_MAX_PACKET_SIZE) pkt_size = NETC_MAX_PACKET_SIZE;
         const uint8_t *pkt = packets[p];
-        for (size_t i = 0; i < pkt_size; i++) {
-            uint32_t bucket = netc_ctx_bucket((uint32_t)i);
-            raw[bucket][pkt[i]]++;
-            totals[bucket]++;
+
+        uint32_t seg_start = 0;
+        for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
+            if (seg_start >= (uint32_t)pkt_size) break;
+            uint32_t seg_end = bucket_end[b];
+            if (seg_end > (uint32_t)pkt_size) seg_end = (uint32_t)pkt_size;
+            uint32_t seg_len = seg_end - seg_start;
+
+            memset(tmp_freq, 0, sizeof(tmp_freq));
+            simd_ops.freq_count(pkt + seg_start, (size_t)seg_len, tmp_freq);
+            for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
+                raw[b][s] += tmp_freq[s];
+            }
+            totals[b] += seg_len;
+            seg_start = seg_end;
         }
     }
 
