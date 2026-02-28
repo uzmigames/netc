@@ -88,7 +88,7 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|armv8)")
     check_c_compiler_flag("-march=armv8-a+simd" NETC_HAS_NEON)
     if(NETC_HAS_NEON)
-        list(APPEND NETC_SIMD_FLAGS "-march=armv8-a+simd")
+        list(APPEND NETC_SIMD_FLAGS "-march=armv8-a+simd+crc")
         add_compile_definitions(NETC_SIMD_NEON=1)
     endif()
 endif()
@@ -106,10 +106,8 @@ set(NETC_CORE_SOURCES
     src/simd/netc_simd_generic.c
     src/simd/netc_simd_sse42.c
     src/simd/netc_simd_avx2.c
+    src/simd/netc_simd_neon.c
 )
-
-# NEON added when compiling for ARM:
-# src/simd/netc_simd_neon.c
 
 # =============================================================================
 # Static library: netc

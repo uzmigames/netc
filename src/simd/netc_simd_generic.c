@@ -147,7 +147,7 @@ void netc_simd_ops_init(netc_simd_ops_t *ops, uint8_t level) {
         ops->delta_encode = netc_delta_encode_neon;
         ops->delta_decode = netc_delta_decode_neon;
         ops->freq_count   = netc_freq_count_neon;
-        ops->crc32_update = netc_crc32_update_generic;
+        ops->crc32_update = netc_crc32_update_neon;
         ops->level        = NETC_SIMD_LEVEL_NEON;
         return;
     }

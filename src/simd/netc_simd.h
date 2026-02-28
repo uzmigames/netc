@@ -145,11 +145,12 @@ void netc_freq_count_avx2  (const uint8_t *data, size_t len, uint32_t *freq);
  * NEON implementations
  * ========================================================================= */
 #if defined(NETC_SIMD_NEON) || defined(__ARM_NEON)
-void netc_delta_encode_neon(const uint8_t *prev, const uint8_t *curr,
-                              uint8_t *out, size_t len);
-void netc_delta_decode_neon(const uint8_t *prev, const uint8_t *residual,
-                              uint8_t *out, size_t len);
-void netc_freq_count_neon  (const uint8_t *data, size_t len, uint32_t *freq);
+void     netc_delta_encode_neon(const uint8_t *prev, const uint8_t *curr,
+                                 uint8_t *out, size_t len);
+void     netc_delta_decode_neon(const uint8_t *prev, const uint8_t *residual,
+                                 uint8_t *out, size_t len);
+void     netc_freq_count_neon  (const uint8_t *data, size_t len, uint32_t *freq);
+uint32_t netc_crc32_update_neon(uint32_t crc, const uint8_t *data, size_t len);
 #endif
 
 #endif /* NETC_SIMD_H */
