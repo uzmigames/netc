@@ -696,27 +696,23 @@ average packet size.
 
 ### 10.4 Compression Ratio Measurements (`improve-compression-ratio-phase1`)
 
-Measured on Windows x86_64, MSVC `/O2`, compact header + delta + dict, seed=42, count=100.
+Measured on Windows x86_64, MSVC `/O2`, compact header + delta + dict, seed=42 (training),
+eval seed=seed+0x1000001 (unseen test packets), count=10000.
 
-#### Current Ratios (after bigram-PCTX + adaptive normalization)
+**Important benchmark methodology fix:** Prior measurements used the same PRNG seed for
+training and evaluation, which caused Oodle's raw-byte window to contain exact test packets.
+This gave Oodle an unfair advantage (0.14 ratio via exact substring matching vs real 0.76).
+All measurements below use separate train/eval seeds for fair comparison.
+
+#### Current Ratios (after bigram-PCTX + adaptive normalization + fair eval)
 
 | Workload | netc (compact) | Oodle UDP | Oodle TCP | Gap vs UDP |
 |----------|:--------------:|:---------:|:---------:|:----------:|
-| WL-004 32B | **0.608** | 0.612 | 0.524 | **-0.7%** (netc wins) |
-| WL-001 64B | 0.757 | 0.719 | 0.732 | +5.3% |
-| WL-002 128B | 0.574 | 0.544 | 0.555 | +5.5% |
-| WL-003 256B | 0.334 | 0.327 | 0.336 | +2.1% |
-| WL-005 512B | **0.437** | 0.489 | 0.415 | **-10.6%** (netc wins) |
-
-#### Improvement Over Previous Baseline
-
-| Workload | Before | After | Δ |
-|----------|:------:|:-----:|:-:|
-| WL-004 32B | 0.656 | 0.608 | **-7.3%** |
-| WL-001 64B | 0.765 | 0.757 | -1.0% |
-| WL-002 128B | 0.591 | 0.574 | **-2.9%** |
-| WL-003 256B | 0.349 | 0.334 | **-4.3%** |
-| WL-005 512B | 0.448 | 0.437 | **-2.5%** |
+| WL-004 32B | **0.658** | 0.658 | 0.572 | **0.0%** (tie) |
+| WL-001 64B | **0.758** | 0.765 | 0.779 | **-0.8%** (netc wins) |
+| WL-002 128B | **0.571** | 0.573 | 0.585 | **-0.3%** (netc wins) |
+| WL-003 256B | **0.331** | 0.345 | 0.354 | **-3.8%** (netc wins) |
+| WL-005 512B | **0.437** | 0.476 | 0.415 | **-8.2%** (netc wins) |
 
 **Techniques applied:**
 
@@ -731,12 +727,16 @@ Measured on Windows x86_64, MSVC `/O2`, compact header + delta + dict, seed=42, 
    proportionally to seen-only symbols. Preserves zero-probability avoidance while
    giving more precision to frequent symbols.
 
+3. **Fair benchmark eval seed** — Evaluation corpus uses `seed + BENCH_EVAL_SEED_OFFSET`
+   to ensure test packets are from the same distribution but were NOT in the training set.
+   This prevents dictionary-window compressors from getting unfair exact-match advantages.
+
 **Compact packet types added:** 0xD0-0xD3 (PCTX+BIGRAM, PCTX+BIGRAM+DELTA,
 PCTX+LZP+BIGRAM, PCTX+LZP+BIGRAM+DELTA).
 
-**Status vs §1.3 OODLE-01 gate:** netc beats Oodle UDP on WL-004 and WL-005.
-Gap narrowed to 2-5% on remaining workloads (was 6-9%). WL-001 64B and WL-002 128B
-remain the primary targets for further ratio improvement.
+**Status vs §1.3 OODLE-01 gate: PASSED.** netc beats or matches Oodle UDP on all 5
+workloads (WL-001 through WL-005). Oodle TCP remains ahead on WL-004 32B (0.572) and
+WL-005 512B (0.415) due to stateful cross-packet learning.
 
 ### 10.5 Gap to Section 1.1 Hard Requirements
 

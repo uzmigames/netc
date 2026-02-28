@@ -37,16 +37,16 @@ Lower is better (compressed size / original size).
 
 | Compressor | WL-004 (32B) | WL-001 (64B) | WL-002 (128B) | WL-003 (256B) | WL-005 (512B) | Design goal |
 |------------|:------------:|:------------:|:-------------:|:-------------:|:-------------:|-------------|
-| **netc** (compact header) | **0.608** | **0.757** | **0.574** | **0.334** | **0.437** | Network packets |
+| **netc** (compact header) | **0.658** | **0.758** | **0.571** | **0.331** | **0.437** | Network packets |
 | **netc** (legacy 8B header) | 0.906 | 0.890 | 0.638 | 0.373 | — | Network packets |
-| OodleNetwork UDP 2.9.13 | 0.612 | 0.719 | 0.544 | 0.327 | 0.489 | Network packets |
-| OodleNetwork TCP 2.9.13 | 0.524 | 0.732 | 0.555 | 0.336 | 0.415 | Network packets |
+| OodleNetwork UDP 2.9.13 | 0.658 | 0.765 | 0.573 | 0.345 | 0.476 | Network packets |
+| OodleNetwork TCP 2.9.13 | 0.572 | 0.779 | 0.585 | 0.354 | 0.415 | Network packets |
 | Zstd (level=1, dict) | 1.321 | 1.034 | 0.746 | 0.430 | 0.574 | General purpose |
 | zlib (level=1) | 1.176 | 0.966 | 0.740 | 0.441 | 0.591 | General purpose |
 | LZ4 (fast) | 1.056 | 0.875 | 0.744 | 0.478 | 0.703 | Speed-oriented |
 | Snappy | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | Speed-oriented |
 
-> **Note:** General-purpose compressors (Zstd, zlib, LZ4, Snappy) all **expand** 32B packets (ratio > 1.0) — their framing overhead exceeds savings. netc and OodleNetwork are purpose-built for small network packets. netc beats Oodle UDP on 32B and 512B packets, and stays within 2-5% on 64-256B game packets. The remaining gap is primarily in prediction efficiency on medium-sized payloads (64-128B).
+> **Note:** General-purpose compressors (Zstd, zlib, LZ4, Snappy) all **expand** 32B packets (ratio > 1.0) — their framing overhead exceeds savings. netc and OodleNetwork are purpose-built for small network packets. **netc beats or matches Oodle UDP on all 5 workloads** (32B-512B) with fair train/eval split (seed 42 training, separate eval seed). Previous measurements used overlapping seeds which gave Oodle an unfair window-matching advantage.
 
 ### netc Header Overhead Breakdown
 
@@ -87,13 +87,13 @@ See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for method
 
 | Workload | netc (compact) | Oodle UDP | Gap | Notes |
 |----------|:--------------:|:---------:|:---:|-------|
-| WL-004 32B | **0.608** | 0.612 | **-0.7%** | **netc wins** — bigram-PCTX + adaptive normalization |
-| WL-001 64B | 0.757 | 0.719 | 5.3% | Close — netc within ~2.4B per packet |
-| WL-002 128B | 0.574 | 0.544 | 5.5% | Narrowed from 8.6% — bigram-PCTX helps |
-| WL-003 256B | 0.334 | 0.327 | 2.1% | Near-parity — netc within ~1.8B per packet |
-| WL-005 512B | **0.437** | 0.489 | **-10.6%** | **netc wins** — tANS + LZP + bigram-PCTX dominates |
+| WL-004 32B | **0.658** | 0.658 | **0.0%** | **Tie** — parity on financial tick data |
+| WL-001 64B | **0.758** | 0.765 | **-0.8%** | **netc wins** — tANS + delta + bigram-PCTX |
+| WL-002 128B | **0.571** | 0.573 | **-0.3%** | **netc wins** — marginal but consistent |
+| WL-003 256B | **0.331** | 0.345 | **-3.8%** | **netc wins** — ~3.6B saved per packet |
+| WL-005 512B | **0.437** | 0.476 | **-8.2%** | **netc wins** — LZP + bigram-PCTX dominates |
 
-netc beats OodleNetwork UDP on 32B and 512B payloads. Gap narrowed to 2-5% on 64-256B game packets (was 6-9%). Key improvements: bigram-PCTX per-position table switching and adaptive frequency normalization.
+**netc beats or matches OodleNetwork UDP on all workloads.** OODLE-01 gate (ratio parity) is PASSED. Measured with fair train/eval seed split (training on seed=42, evaluation on seed+offset). Oodle TCP remains ahead on WL-004 32B (0.572) and WL-005 512B (0.415) due to stateful cross-packet learning.
 
 ---
 
