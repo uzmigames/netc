@@ -17,16 +17,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **LZP (Lempel-Ziv Prediction) XOR pre-filter** — position-aware order-1 context prediction. XOR each byte with its LZP prediction before tANS encoding; correctly predicted bytes become `0x00`, concentrating the distribution. Integrated into dict training (Boyer-Moore majority vote) and serialization (dict format v4).
 - **Bigram context model** (`NETC_CFG_FLAG_BIGRAM`) — order-1 bigram frequency tables trained per context bucket. 4 bigram tables (16 x 4 x 256 x uint16) added to dictionary.
 - **Dictionary format v4** — extends v3 with LZP hash table (131072 entries x 2 bytes = 256 KB) and dict_flags field. Backward-compatible: v3 dicts load without LZP.
+- **Delta-LZP comparison** — for packets ≤ 512B, when delta+tANS succeeds and an LZP table is available, also tries LZP-only on raw (non-delta) bytes. Uses the smaller result. Improves compression by 2-8% on structured game packets where position-aware LZP predictions outperform inter-packet deltas.
 - **`test_compact_header.c`** — 25 tests: packet type encode/decode round-trip, size varint boundaries, compact compress/decompress round-trip (passthrough, tANS, delta, multi-packet), ANS state compaction verification, error cases.
 - **Benchmark `--compact-hdr` flag** — enables compact headers in benchmark runs.
 - Zstd `ZDICT_trainFromBuffer` dependency added to bench (optional, auto-detected)
 
+### Fixed
+
+- **LZP compact mode BIGRAM mismatch** — LZP compact packet types (0x70-0x8F) cannot encode the BIGRAM flag, but the encoder could produce LZP packets with bigram tables active. The decompressor decoded with unigram tables causing round-trip failures. Fixed by stripping BIGRAM from tANS context flags when LZP is active in compact mode.
+- **LZP compact mode X2 mismatch** — LZP compact packet types cannot encode the X2 (dual-state) flag. For packets ≥ 256B, X2 encoding was selected but silently dropped from the compact header, causing the decompressor to decode with single-state instead of dual-state. Fixed by adding `NETC_INTERNAL_NO_X2` suppression flag. Affected WL-003 (256B), WL-005 (512B), and WL-008 (mixed traffic).
+- **tANS-raw fallback LZP path** — the fallback path (delta residuals too noisy → retry on raw bytes with LZP) did not strip BIGRAM or suppress X2 in compact mode. Same root cause as above, different code path.
+
 ### Changed
 
-- Compression ratio improved significantly with compact headers enabled:
-  - WL-001 (64B): 0.908 -> **0.783** (13.8% improvement)
-  - WL-002 (128B): 0.673 -> **0.626** (7.0% improvement)
-  - WL-003 (256B): 0.403 -> **0.381** (5.5% improvement)
+- Compression ratio improved significantly with compact headers and delta-LZP comparison:
+  - WL-001 (64B): 0.908 -> **0.765** compact / **0.890** legacy
+  - WL-002 (128B): 0.673 -> **0.591** compact / **0.638** legacy
+  - WL-003 (256B): 0.403 -> **0.349** compact / **0.373** legacy
+- WL-003 compact mode (0.349) is now within 0.1% of OodleNetwork baseline (0.35).
 - Legacy (8B header) mode is fully backward-compatible; no behavior changes without `NETC_CFG_FLAG_COMPACT_HDR`.
 
 ---

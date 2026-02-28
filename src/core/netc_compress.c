@@ -27,6 +27,11 @@
 #include <string.h>
 #include <limits.h>
 
+/* Internal-only flag: suppress X2 dual-state encoding.
+ * Used when LZP compact types are active — the compact packet type table
+ * for LZP (0x70-0x8F) cannot represent X2, so encoding must be single-state. */
+#define NETC_INTERNAL_NO_X2  (1U << 31)
+
 /* =========================================================================
  * Internal: FNV-1a hash of 3 bytes folded to 4096 (for ring_ht)
  * ========================================================================= */
@@ -479,7 +484,8 @@ static size_t try_tans_single_with_table(
     /* Use dual-interleaved (x2) encode for regions >= 256 bytes.
      * X2 has 2×state overhead vs 1× for single-state — the extra bytes are costly
      * on small packets and the ILP benefit is negligible under 256B. */
-    if (!(ctx_flags & NETC_CFG_FLAG_BIGRAM) && src_size >= 256 && dst_payload_cap >= state2_sz) {
+    if (!(ctx_flags & NETC_CFG_FLAG_BIGRAM) && !(ctx_flags & NETC_INTERNAL_NO_X2) &&
+        src_size >= 256 && dst_payload_cap >= state2_sz) {
         netc_bsw_t bsw;
         netc_bsw_init(&bsw, dst + state2_sz, dst_payload_cap - state2_sz);
 
@@ -804,11 +810,65 @@ netc_result_t netc_compress(
         int     used_x2   = 0;
         uint32_t tbl_idx  = 0;
 
+        /* When LZP is active in compact mode, strip BIGRAM from flags.
+         * Compact packet types for LZP (0x70-0x8F) don't encode BIGRAM,
+         * so the decompressor won't use bigram tables — the encoder must
+         * match by also using unigram tables.  PCTX handles LZP via its
+         * own compact type (0x06/0x07), so BIGRAM stripping is moot for
+         * PCTX since it already uses position-based table selection. */
+        uint32_t tans_ctx_flags = ctx->flags;
+        if (did_lzp && compact_mode)
+            tans_ctx_flags = (tans_ctx_flags & ~(uint32_t)NETC_CFG_FLAG_BIGRAM)
+                             | NETC_INTERNAL_NO_X2;
+
         if (try_tans_compress(dict, compress_src, src_size,
                               payload, payload_cap,
                               &compressed_payload, &used_mreg, &used_x2, &tbl_idx,
-                              ctx->flags, compact_mode) == 0 &&
+                              tans_ctx_flags, compact_mode) == 0 &&
             compressed_payload < src_size) {
+
+            /* Delta-vs-LZP comparison: when delta+tANS succeeded but an LZP
+             * table is available, also try LZP-only on raw bytes.  For small
+             * packets (WL-001 64B, WL-002 128B) LZP often beats delta because
+             * position-aware predictions are more accurate than inter-packet
+             * deltas for structured fields.  Use stack buffers (bounded ≤512B).
+             *
+             * Strip BIGRAM from the trial flags: compact packet types for LZP
+             * don't encode the BIGRAM flag (only LZP and LZP+DELTA are defined).
+             * Using unigram tables in the trial matches what the decompressor
+             * will use after reading the compact header. */
+            if (did_delta && dict->lzp_table != NULL && src_size <= 512) {
+                uint8_t lzp_trial_src[512];
+                uint8_t lzp_trial_dst[520];
+                netc_lzp_xor_filter((const uint8_t *)src, src_size,
+                                    dict->lzp_table, lzp_trial_src);
+
+                size_t  lzp_cp = 0;
+                int     lzp_mreg = 0, lzp_x2 = 0;
+                uint32_t lzp_tbl = 0;
+                /* Strip DELTA and BIGRAM, suppress X2: LZP compact types
+                 * (0x70-0x8F) can't carry BIGRAM or X2 flags. */
+                uint32_t lzp_ctx = (ctx->flags
+                    & ~(uint32_t)(NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_BIGRAM))
+                    | (compact_mode ? NETC_INTERNAL_NO_X2 : 0u);
+                if (try_tans_compress(dict, lzp_trial_src, src_size,
+                                      lzp_trial_dst, sizeof(lzp_trial_dst),
+                                      &lzp_cp, &lzp_mreg, &lzp_x2, &lzp_tbl,
+                                      lzp_ctx, compact_mode) == 0 &&
+                    lzp_cp < compressed_payload)
+                {
+                    /* LZP-only beats delta — switch to LZP result */
+                    memcpy(payload, lzp_trial_dst, lzp_cp);
+                    compressed_payload = lzp_cp;
+                    used_mreg = lzp_mreg;
+                    used_x2   = lzp_x2;
+                    tbl_idx   = lzp_tbl;
+                    pkt_flags &= ~(uint8_t)NETC_PKT_FLAG_DELTA;
+                    did_delta  = 0;
+                    did_lzp    = 1;
+                    tans_ctx_flags = lzp_ctx; /* match the trial encoding flags */
+                }
+            }
 
             /* tANS compressed — check if LZ77 would do better.
              * Only try LZ77 when tANS ratio > 0.5 (high-redundancy data).
@@ -1019,7 +1079,7 @@ case_b_skip:;
              * PCTX: algorithm=NETC_ALG_TANS_PCTX (per-position context). */
             uint8_t extra_flags = (used_mreg == 1 ? NETC_PKT_FLAG_MREG : 0)
                                 | (used_x2   ? NETC_PKT_FLAG_X2     : 0)
-                                | ((ctx->flags & NETC_CFG_FLAG_BIGRAM) ? NETC_PKT_FLAG_BIGRAM : 0);
+                                | ((tans_ctx_flags & NETC_CFG_FLAG_BIGRAM) ? NETC_PKT_FLAG_BIGRAM : 0);
             netc_pkt_header_t hdr;
             hdr.original_size   = (uint16_t)src_size;
             hdr.compressed_size = (uint16_t)compressed_payload;
@@ -1078,6 +1138,11 @@ case_b_skip:;
                                 dict->lzp_table, ctx->arena);
             raw_src = ctx->arena;
             fallback_lzp = 1;
+            /* LZP compact types (0x70-0x8F) can't encode BIGRAM or X2 —
+             * strip BIGRAM and suppress X2 to match the decompressor. */
+            if (compact_mode)
+                raw_ctx_flags = (raw_ctx_flags & ~(uint32_t)NETC_CFG_FLAG_BIGRAM)
+                                | NETC_INTERNAL_NO_X2;
         }
         if (try_tans_compress(dict, raw_src, src_size,
                               payload, payload_cap,
