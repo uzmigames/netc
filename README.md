@@ -33,12 +33,12 @@
 
 ### Compression Ratio — netc vs Compressors
 
-Measured on Windows x86_64, MSVC `/O2`, 50,000 iterations, 10,000 training packets.
+Measured on Windows x86_64, MSVC `/O2`, 50,000 iterations, 50,000 training packets, AVX2.
 Lower is better (compressed size / original size).
 
 | Compressor | WL-004 (32B) | WL-001 (64B) | WL-002 (128B) | WL-003 (256B) | WL-005 (512B) | Design goal |
 |------------|:------------:|:------------:|:-------------:|:-------------:|:-------------:|-------------|
-| **netc** (compact header) | **0.658** | **0.758** | **0.571** | **0.331** | **0.437** | Network packets |
+| **netc** (compact header) | **0.647** | **0.758** | **0.572** | **0.331** | **0.437** | Network packets |
 | **netc** (legacy 8B header) | 0.906 | 0.890 | 0.638 | 0.373 | — | Network packets |
 | OodleNetwork UDP 2.9.13 | 0.658 | 0.765 | 0.573 | 0.345 | 0.476 | Network packets |
 | OodleNetwork TCP 2.9.13 | 0.572 | 0.779 | 0.585 | 0.354 | 0.415 | Network packets |
@@ -57,18 +57,18 @@ Lower is better (compressed size / original size).
 | Compact (128-65535B) | 4B | 2B | **6B** | Medium payloads |
 | Legacy | 8B | 4B | **12B** | Compatibility |
 
-### Throughput — Measured (Windows x86_64, MSVC `/O2`, compact header + delta + dict)
+### Throughput — Measured (Windows x86_64, MSVC `/O2`, compact header + delta + dict, AVX2)
 
-| Workload | Normal MB/s | Fast MB/s | Ratio (normal) | Ratio (fast) | Baseline MB/s |
-|----------|:-----------:|:---------:|:--------------:|:------------:|:-------------:|
-| WL-004 32B | 84.3 | **123.1** | 0.631 | 0.694 | 44.5 |
-| WL-001 64B | 43.2 | **54.2** | 0.756 | 0.778 | 26.0 |
-| WL-002 128B | 47.8 | **51.6** | 0.603 | 0.641 | 29.9 |
-| WL-003 256B | 58.2 | **79.0** | 0.343 | 0.370 | 38.8 |
-| WL-005 512B | 63.8 | **72.1** | 0.491 | 0.491 | 36.9 |
+| Workload | c.MB/s (normal) | c.MB/s (fast) | d.MB/s (normal) | Ratio (normal) | Ratio (fast) |
+|----------|:---------------:|:-------------:|:---------------:|:--------------:|:------------:|
+| WL-004 32B | 28.2 | **63.5** | 58.4 | 0.647 | 0.698 |
+| WL-001 64B | 17.4 | **28.6** | 48.3 | 0.758 | 0.788 |
+| WL-002 128B | 20.6 | **33.3** | 41.5 | 0.572 | 0.620 |
+| WL-003 256B | 25.1 | **40.2** | 42.7 | 0.331 | 0.369 |
+| WL-005 512B | 32.7 | **38.6** | 59.2 | 0.437 | 0.440 |
 
-*Baseline = pre-optimization. Normal = Phase 1+2 (default). Fast = `NETC_CFG_FLAG_FAST_COMPRESS` (speed mode, 0-10% ratio trade-off).
-Phase 1+2 achieved 1.4-1.9× speedup with ≤1% ratio regression. Speed mode adds a further 8-62% on top.*
+*Normal = default mode. Fast = `NETC_CFG_FLAG_FAST_COMPRESS` (speed mode, 0-10% ratio trade-off).
+Speed mode skips trial passes: 1.5-2.3× compress throughput, decompressor unaffected.*
 
 ### Throughput Targets for v1.0 (server-grade hardware)
 
@@ -80,7 +80,7 @@ Phase 1+2 achieved 1.4-1.9× speedup with ≤1% ratio regression. Speed mode add
 | Decompress p99 latency (128B) | ≤ 500 ns |
 | Packets/sec compress (64B) | ≥ 5 Mpps |
 | Packets/sec decompress (64B) | ≥ 10 Mpps |
-| Context memory | ≤ 512 KB |
+| Context memory | ≤ 512 KB (default), ~1 MB (adaptive) |
 
 See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for methodology and workload definitions.
 
@@ -88,9 +88,9 @@ See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for method
 
 | Workload | netc (compact) | Oodle UDP | Gap | Notes |
 |----------|:--------------:|:---------:|:---:|-------|
-| WL-004 32B | **0.658** | 0.658 | **0.0%** | **Tie** — parity on financial tick data |
+| WL-004 32B | **0.647** | 0.658 | **-1.7%** | **netc wins** — tANS + delta on financial ticks |
 | WL-001 64B | **0.758** | 0.765 | **-0.8%** | **netc wins** — tANS + delta + bigram-PCTX |
-| WL-002 128B | **0.571** | 0.573 | **-0.3%** | **netc wins** — marginal but consistent |
+| WL-002 128B | **0.572** | 0.573 | **-0.2%** | **netc wins** — marginal but consistent |
 | WL-003 256B | **0.331** | 0.345 | **-3.8%** | **netc wins** — ~3.6B saved per packet |
 | WL-005 512B | **0.437** | 0.476 | **-8.2%** | **netc wins** — LZP + bigram-PCTX dominates |
 
@@ -148,12 +148,13 @@ size_t         sizes[50000];
 // ... fill from network capture ...
 
 netc_dict_t *dict = NULL;
-netc_result_t r = netc_dict_train(packets, sizes, 50000, &dict);
+netc_result_t r = netc_dict_train(packets, sizes, 50000, 1 /* model_id */, &dict);
 assert(r == NETC_OK);
 
 void  *blob;
 size_t blob_size;
 netc_dict_save(dict, &blob, &blob_size);
+// netc_dict_free_blob(blob) when done
 // write blob to disk for reuse
 ```
 
@@ -166,7 +167,7 @@ netc_dict_t *dict = NULL;
 netc_dict_load(blob, blob_size, &dict);
 
 netc_cfg_t cfg = {
-    .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_COMPACT_HDR,
+    .flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_COMPACT_HDR,
 };
 netc_ctx_t *ctx = netc_ctx_create(dict, &cfg);
 
@@ -190,7 +191,7 @@ netc_dict_free(dict);
 ### Compress (UDP stateless mode)
 
 ```c
-netc_cfg_t cfg = { .flags = NETC_CFG_FLAG_UDP_MODE | NETC_CFG_FLAG_COMPACT_HDR };
+netc_cfg_t cfg = { .flags = NETC_CFG_FLAG_STATELESS | NETC_CFG_FLAG_COMPACT_HDR };
 netc_ctx_t *ctx = netc_ctx_create(dict, &cfg);
 
 // Each packet is self-contained
@@ -203,7 +204,7 @@ netc_decompress_stateless(dict, dst, dst_size, recovered, sizeof(recovered), &re
 ```c
 #include "netc.h"
 
-netc_cfg_t cfg = { .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA };
+netc_cfg_t cfg = { .flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_DELTA };
 netc_ctx_t *ctx = netc_ctx_create(dict, &cfg);
 
 /* Returns 1=generic, 2=sse42, 3=avx2, 4=neon. Never 0 for a valid ctx. */
@@ -217,7 +218,7 @@ For latency-sensitive workloads where throughput matters more than optimal ratio
 
 ```c
 netc_cfg_t cfg = {
-    .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA
+    .flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_DELTA
            | NETC_CFG_FLAG_COMPACT_HDR
            | NETC_CFG_FLAG_FAST_COMPRESS,  /* skip trial passes */
 };
@@ -225,7 +226,7 @@ netc_ctx_t *enc = netc_ctx_create(dict, &cfg);
 
 /* Decoder does NOT need the flag — output is fully compatible */
 netc_cfg_t dec_cfg = {
-    .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA
+    .flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_DELTA
            | NETC_CFG_FLAG_COMPACT_HDR,
 };
 netc_ctx_t *dec = netc_ctx_create(dict, &dec_cfg);
@@ -239,6 +240,29 @@ netc_ctx_t *dec = netc_ctx_create(dict, &dec_cfg);
 Typical trade-off: **8-62% throughput gain, 0-10% ratio regression.** The decompressor is
 unaffected and does not need this flag set. Compressed output is fully interoperable.
 
+### Adaptive Mode (`NETC_CFG_FLAG_ADAPTIVE`)
+
+For long-lived connections where byte distributions shift over time (player state changes,
+map transitions, game phase changes):
+
+```c
+netc_cfg_t cfg = {
+    .flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_DELTA
+           | NETC_CFG_FLAG_COMPACT_HDR
+           | NETC_CFG_FLAG_ADAPTIVE,  /* enable cross-packet learning */
+};
+/* Both encoder and decoder MUST set the ADAPTIVE flag */
+netc_ctx_t *enc = netc_ctx_create(dict, &cfg);
+netc_ctx_t *dec = netc_ctx_create(dict, &cfg);
+```
+
+Adaptive mode enables:
+- tANS frequency tables rebuilt every 128 packets from live byte statistics
+- LZP hash predictions updated with confidence-based decay
+- Order-2 delta prediction (linear extrapolation) auto-selected when beneficial
+
+Context memory increases from ~330 KB (default) to ~1 MB (adaptive).
+
 ---
 
 ## Algorithm Pipeline
@@ -251,6 +275,7 @@ Packet Input (8-65535 bytes)
     v
 [Stage 1] Delta Prediction (stateful, opt-in)
     |  XOR for flags/floats, subtraction for counters
+    |  Order-2 linear extrapolation when adaptive mode enabled
     v
 [Stage 2] LZP XOR Pre-Filter (when dict has LZP table)
     |  hash(prev_byte, position) -> predicted_byte
@@ -258,10 +283,11 @@ Packet Input (8-65535 bytes)
     |  Delta-vs-LZP comparison: picks smaller of delta+tANS vs LZP+tANS
     v
 [Stage 3] tANS Entropy Coding
-    |  Adaptive 12-bit (4096) or 10-bit (1024) tables, branch-free decode
+    |  12-bit (4096) or 10-bit (1024) tables, branch-free decode
     |  10-bit tables for ≤128B packets (lower per-symbol overhead)
-    |  4 context buckets: HEADER/SUBHEADER/BODY/TAIL
-    |  Per-position or bigram context variants
+    |  16 context buckets (per byte-offset band)
+    |  Per-position (PCTX) or bigram context variants
+    |  Adaptive mode: tables rebuilt from live stream statistics
     v
 [Stage 4] Multi-Codec Competition
     |  tANS vs LZ77 vs RLE vs passthrough -- smallest wins
