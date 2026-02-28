@@ -450,7 +450,7 @@ select_tans_table(const netc_dict_t *dict, uint32_t bucket,
                   uint8_t prev_byte, uint32_t ctx_flags)
 {
     if (ctx_flags & NETC_CFG_FLAG_BIGRAM) {
-        uint32_t bclass = netc_bigram_class(prev_byte);
+        uint32_t bclass = netc_bigram_class(prev_byte, dict->bigram_class_map);
         const netc_tans_table_t *tbl = &dict->bigram_tables[bucket][bclass];
         if (tbl->valid) return tbl;
     }
@@ -525,6 +525,41 @@ static size_t try_tans_single_with_table(
         netc_write_u32_le(dst, final_state);
     *used_x2_flag = 0;
     return state1_sz + bs;
+}
+
+/* =========================================================================
+ * Internal: 10-bit tANS encode with explicit table (small-packet optimization)
+ *
+ * Encodes all src bytes using the provided 10-bit table.
+ * 10-bit state is ALWAYS 2B (uint16, range [1024,2048)).
+ * No X2 dual-state for 10-bit (packets are small, ILP benefit negligible).
+ * Returns compressed payload size on success, (size_t)-1 on failure.
+ * ========================================================================= */
+static size_t try_tans_10bit_with_table(
+    const netc_tans_table_10_t *tbl,
+    const uint8_t              *src,
+    size_t                      src_size,
+    uint8_t                    *dst,
+    size_t                      dst_payload_cap)
+{
+    if (!tbl->valid) return (size_t)-1;
+
+    /* 10-bit state always fits in 2 bytes [1024, 2048) = 11 bits */
+    const size_t state_sz = 2u;
+    if (dst_payload_cap < state_sz) return (size_t)-1;
+
+    netc_bsw_t bsw;
+    netc_bsw_init(&bsw, dst + state_sz, dst_payload_cap - state_sz);
+
+    uint32_t final_state = netc_tans_encode_10(tbl, src, src_size,
+                                                &bsw, NETC_TANS_TABLE_SIZE_10);
+    if (final_state == 0) return (size_t)-1;
+
+    size_t bs = netc_bsw_flush(&bsw);
+    if (bs == (size_t)-1) return (size_t)-1;
+
+    netc_write_u16_le(dst, (uint16_t)final_state);
+    return state_sz + bs;
 }
 
 /* =========================================================================
@@ -1068,10 +1103,50 @@ case_b_skip:;
                 }
             }
 
+            /* --- 10-bit tANS competition for small packets (<=128B) ---
+             *
+             * For small packets, the 12-bit tANS table may waste bits on
+             * infrequent symbols (each gets at least 1/4096 of the state space).
+             * A 10-bit table (1024 entries) can be more efficient because:
+             *   (a) Smaller table = less per-symbol overhead for rare symbols
+             *   (b) Better L1 cache utilization (7.5 KB vs 28 KB)
+             *   (c) State fits in 11 bits [1024,2048) — still fits uint16
+             *
+             * Only try 10-bit when: single-region (used_mreg==0), no MREG/PCTX,
+             * no LZP, no bigram, compact mode, and <=128B.
+             * The 10-bit table is built on-the-fly from the winning 12-bit table. */
+            int used_tans_10 = 0;
+            if (src_size <= 128u &&
+                used_mreg == 0 && !did_lzp &&
+                !(tans_ctx_flags & NETC_CFG_FLAG_BIGRAM) &&
+                compact_mode)
+            {
+                /* Rescale the winning 12-bit freq table to 10-bit (1024-sum) */
+                const netc_tans_table_t *tbl12 = &dict->tables[tbl_idx];
+                netc_freq_table_t freq10;
+                if (netc_freq_rescale_12_to_10(&tbl12->freq, &freq10) == 0) {
+                    netc_tans_table_10_t tbl10;
+                    if (netc_tans_build_10(&tbl10, &freq10) == 0) {
+                        uint8_t trial10[136]; /* 128B + 8B overhead max */
+                        size_t cp10 = try_tans_10bit_with_table(
+                            &tbl10, compress_src, src_size,
+                            trial10, sizeof(trial10));
+                        if (cp10 != (size_t)-1 && cp10 < compressed_payload) {
+                            /* 10-bit wins — copy to dst payload */
+                            memcpy(payload, trial10, cp10);
+                            compressed_payload = cp10;
+                            used_tans_10 = 1;
+                            used_x2 = 0; /* 10-bit never uses x2 */
+                        }
+                    }
+                }
+            }
+
             /* tANS wins.  used_mreg: 0=single-region, 1=MREG, 2=PCTX.
              * Single-region: encode table index in upper 4 bits of algorithm byte.
              * MREG: algorithm=NETC_ALG_TANS, flags|=MREG.
-             * PCTX: algorithm=NETC_ALG_TANS_PCTX (per-position context). */
+             * PCTX: algorithm=NETC_ALG_TANS_PCTX (per-position context).
+             * 10-bit: algorithm=NETC_ALG_TANS_10 (adaptive small-packet). */
             uint8_t extra_flags = (used_mreg == 1 ? NETC_PKT_FLAG_MREG : 0)
                                 | (used_x2   ? NETC_PKT_FLAG_X2     : 0)
                                 | ((tans_ctx_flags & NETC_CFG_FLAG_BIGRAM) ? NETC_PKT_FLAG_BIGRAM : 0);
@@ -1079,7 +1154,9 @@ case_b_skip:;
             hdr.original_size   = (uint16_t)src_size;
             hdr.compressed_size = (uint16_t)compressed_payload;
             hdr.flags           = pkt_flags | extra_flags;
-            if (did_lzp) {
+            if (used_tans_10) {
+                hdr.algorithm = (uint8_t)(NETC_ALG_TANS_10 | (tbl_idx << 4));
+            } else if (did_lzp) {
                 /* LZP XOR pre-filter was applied; signal decompressor to invert.
                  * For PCTX: use NETC_ALG_TANS_PCTX | 0x10 (upper nibble marks LZP).
                  * For single-region/MREG: algorithm = NETC_ALG_LZP. */
@@ -1216,6 +1293,32 @@ case_b_skip:;
                 }
             }
 
+            /* --- 10-bit tANS competition for raw-tANS fallback (small packets) --- */
+            int raw_tans_10 = 0;
+            if (src_size <= 128u &&
+                raw_mreg == 0 && !fallback_lzp &&
+                !(raw_ctx_flags & NETC_CFG_FLAG_BIGRAM) &&
+                compact_mode)
+            {
+                const netc_tans_table_t *tbl12 = &dict->tables[raw_tbl];
+                netc_freq_table_t freq10;
+                if (netc_freq_rescale_12_to_10(&tbl12->freq, &freq10) == 0) {
+                    netc_tans_table_10_t tbl10;
+                    if (netc_tans_build_10(&tbl10, &freq10) == 0) {
+                        uint8_t trial10[136];
+                        size_t cp10 = try_tans_10bit_with_table(
+                            &tbl10, raw_src, src_size,
+                            trial10, sizeof(trial10));
+                        if (cp10 != (size_t)-1 && cp10 < raw_payload) {
+                            memcpy(payload, trial10, cp10);
+                            raw_payload = cp10;
+                            raw_tans_10 = 1;
+                            raw_x2 = 0;
+                        }
+                    }
+                }
+            }
+
             /* Raw tANS succeeds — emit without the delta flag but preserve bigram */
             uint8_t extra_flags = (raw_mreg == 1 ? NETC_PKT_FLAG_MREG : 0)
                                 | (raw_x2   ? NETC_PKT_FLAG_X2   : 0)
@@ -1224,7 +1327,9 @@ case_b_skip:;
             hdr.original_size   = (uint16_t)src_size;
             hdr.compressed_size = (uint16_t)raw_payload;
             hdr.flags           = NETC_PKT_FLAG_DICT_ID | extra_flags;
-            if (fallback_lzp) {
+            if (raw_tans_10) {
+                hdr.algorithm = (uint8_t)(NETC_ALG_TANS_10 | (raw_tbl << 4));
+            } else if (fallback_lzp) {
                 if (raw_mreg == 2) {
                     hdr.algorithm = NETC_ALG_TANS_PCTX | 0x10u;
                 } else {

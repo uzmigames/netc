@@ -39,24 +39,41 @@
  * Coprime with TABLE_SIZE=4096 (2563 is odd → GCD(2563,4096)=1). */
 #define NETC_TANS_SPREAD_STEP ((NETC_TANS_TABLE_SIZE >> 1) + (NETC_TANS_TABLE_SIZE >> 3) + 3U)
 
+/* =========================================================================
+ * 10-bit tANS parameters — for small packets (<=128B)
+ *
+ * Smaller table = less per-symbol overhead for infrequent symbols + better
+ * L1 cache utilization (7.5 KB total vs 28 KB for 12-bit tables).
+ * State range: [1024, 2048) — still fits uint16.
+ * ========================================================================= */
+
+#define NETC_TANS_TABLE_LOG_10  10U
+#define NETC_TANS_TABLE_SIZE_10 (1U << NETC_TANS_TABLE_LOG_10)  /* 1024 */
+
+/* Spread step: coprime with 1024. (512 + 128 + 3) = 643, GCD(643,1024)=1. */
+#define NETC_TANS_SPREAD_STEP_10 643U
+
 /* Context bucket count — 16 fine-grained offset ranges (v0.2+).
  * Finer granularity allows the entropy coder to specialize per byte-offset band,
  * reducing cross-region entropy mixing (e.g. zero-padding vs float fields). */
 #define NETC_CTX_COUNT      16U
 
-/* Bigram context class count (v0.3+).
- * Each position bucket has NETC_BIGRAM_CTX_COUNT sub-tables, selected by the
- * two most-significant bits of the previous byte (prev_byte >> 6):
- *   class 0: prev byte in [0x00..0x3F]  — null/small/ASCII-low
- *   class 1: prev byte in [0x40..0x7F]  — ASCII-high/punctuation
- *   class 2: prev byte in [0x80..0xBF]  — high bytes / UTF-8 continuations
- *   class 3: prev byte in [0xC0..0xFF]  — leading bytes / protocol markers
+/* Bigram context class count (v0.5+: 8 trained classes).
+ * Each position bucket has NETC_BIGRAM_CTX_COUNT sub-tables, selected by
+ * the trained class_map (v5) or prev_byte >> 6 (v4 fallback).
  * Controlled by NETC_CFG_FLAG_BIGRAM / NETC_PKT_FLAG_BIGRAM. */
-#define NETC_BIGRAM_CTX_COUNT 4U
+#define NETC_BIGRAM_CTX_COUNT    8U
 
-/* Map a previous byte value to its bigram context class (0..3). */
-static NETC_INLINE uint32_t netc_bigram_class(uint8_t prev_byte) {
-    return (uint32_t)(prev_byte >> 6);
+/* v4 backward-compat: 4 static classes via prev_byte >> 6. */
+#define NETC_BIGRAM_CTX_COUNT_V4 4U
+
+/* Map a previous byte value to its bigram context class.
+ * If class_map is non-NULL, uses trained 8-class mapping (v5).
+ * Otherwise falls back to static 4-class mapping (v4: prev_byte >> 6). */
+static NETC_INLINE uint32_t netc_bigram_class(uint8_t prev_byte,
+                                               const uint8_t *class_map) {
+    if (class_map) return (uint32_t)class_map[prev_byte];
+    return (uint32_t)(prev_byte >> 6);  /* v4 fallback */
 }
 
 /* Backward-compat aliases for the four coarse v0.1 names.
@@ -160,6 +177,22 @@ typedef struct {
     uint8_t                  valid;  /* 1 if tables are built, 0 otherwise */
     uint8_t                  _pad[3];
 } netc_tans_table_t;
+
+/* =========================================================================
+ * Per-bucket 10-bit tANS table (small-packet optimization)
+ *
+ * Identical structure to netc_tans_table_t but with 1024-entry tables.
+ * Total footprint: ~7.5 KB vs ~28 KB for 12-bit tables.
+ * ========================================================================= */
+
+typedef struct {
+    netc_tans_decode_entry_t decode[NETC_TANS_TABLE_SIZE_10]; /* 4 KB */
+    uint16_t                 encode_state[NETC_TANS_TABLE_SIZE_10]; /* 2 KB */
+    netc_tans_encode_entry_t encode[NETC_TANS_SYMBOLS];        /* 2 KB */
+    netc_freq_table_t        freq;                              /* 512 B — normalized to 1024 */
+    uint8_t                  valid;
+    uint8_t                  _pad[3];
+} netc_tans_table_10_t;
 
 /* =========================================================================
  * tANS table builder
@@ -271,5 +304,61 @@ int netc_tans_decode_pctx(
     size_t                   dst_size,
     uint32_t                 initial_state
 );
+
+/* =========================================================================
+ * 10-bit tANS table builder
+ *
+ * Builds encode and decode tables from a normalized frequency table.
+ * freq must sum to exactly NETC_TANS_TABLE_SIZE_10 (1024).
+ * Uses FSE spread function with NETC_TANS_SPREAD_STEP_10 (643).
+ * Returns 0 on success, -1 on invalid input.
+ * ========================================================================= */
+
+int netc_tans_build_10(netc_tans_table_10_t *tbl, const netc_freq_table_t *freq);
+
+/* =========================================================================
+ * 10-bit tANS encoder
+ *
+ * Encodes src[0..src_size) into the bitstream writer (in reverse order).
+ * State range: [1024, 2048).
+ * Returns final ANS state (needed for decoder to start), or 0 on error.
+ * ========================================================================= */
+
+uint32_t netc_tans_encode_10(
+    const netc_tans_table_10_t *tbl,
+    const uint8_t              *src,
+    size_t                      src_size,
+    netc_bsw_t                 *bsw,
+    uint32_t                    initial_state
+);
+
+/* =========================================================================
+ * 10-bit tANS decoder
+ *
+ * Decodes dst_size symbols into dst.
+ * initial_state: the final encoder state (stored in the packet header).
+ * State range: [1024, 2048).
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_10(
+    const netc_tans_table_10_t *tbl,
+    netc_bsr_t                 *bsr,
+    uint8_t                    *dst,
+    size_t                      dst_size,
+    uint32_t                    initial_state
+);
+
+/* =========================================================================
+ * Frequency rescaling: 12-bit (4096-sum) → 10-bit (1024-sum)
+ *
+ * Rescales a frequency table normalized to 4096 down to 1024.
+ * Ensures minimum frequency of 1 for all non-zero symbols.
+ * Adjusts the largest symbol to hit exactly 1024.
+ * Returns 0 on success, -1 on invalid input.
+ * ========================================================================= */
+
+int netc_freq_rescale_12_to_10(const netc_freq_table_t *freq12,
+                               netc_freq_table_t       *freq10);
 
 #endif /* NETC_TANS_H */

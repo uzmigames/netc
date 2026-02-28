@@ -256,7 +256,7 @@ decomp_select_tbl(const netc_dict_t *dict, uint32_t bucket,
                   uint8_t prev_byte, uint8_t pkt_flags)
 {
     if (pkt_flags & NETC_PKT_FLAG_BIGRAM) {
-        uint32_t bclass = netc_bigram_class(prev_byte);
+        uint32_t bclass = netc_bigram_class(prev_byte, dict->bigram_class_map);
         const netc_tans_table_t *tbl = &dict->bigram_tables[bucket][bclass];
         if (tbl->valid) return tbl;
     }
@@ -450,11 +450,12 @@ netc_result_t netc_decompress(
     /* Upper 4 bits of the algorithm byte encode the table bucket index for
      * single-region tANS/LZP packets (set by encoder when using best-fit
      * table selection for small multi-bucket packets).  Normalize when the
-     * low 4 bits are NETC_ALG_TANS or NETC_ALG_LZP. */
+     * low 4 bits are NETC_ALG_TANS, NETC_ALG_LZP, or NETC_ALG_TANS_10. */
     uint8_t alg_id = hdr.algorithm;
     if ((alg_id & 0x0Fu) == NETC_ALG_TANS)      alg_id = NETC_ALG_TANS;
     if ((alg_id & 0x0Fu) == NETC_ALG_LZP)       alg_id = NETC_ALG_LZP;
     if ((alg_id & 0x0Fu) == NETC_ALG_TANS_PCTX) alg_id = NETC_ALG_TANS_PCTX;
+    if ((alg_id & 0x0Fu) == NETC_ALG_TANS_10)   alg_id = NETC_ALG_TANS_10;
 
     switch (alg_id) {
         case NETC_ALG_PASSTHRU: {
@@ -673,6 +674,69 @@ netc_result_t netc_decompress(
             return NETC_OK;
         }
 
+        case NETC_ALG_TANS_10: {
+            /* 10-bit tANS: small-packet optimization.
+             * Wire format: [2B state (uint16 LE)][bitstream].
+             * State range: [1024, 2048).
+             * The table bucket index is encoded in hdr->algorithm upper nibble.
+             * We rescale the 12-bit freq table to 10-bit and build on the fly. */
+            if (ctx->dict == NULL) return NETC_ERR_DICT_INVALID;
+            uint32_t bucket = (uint32_t)(hdr.algorithm >> 4);
+            if (bucket >= NETC_CTX_COUNT) bucket = 0;
+            const netc_tans_table_t *tbl12 = &ctx->dict->tables[bucket];
+            if (!tbl12->valid) return NETC_ERR_DICT_INVALID;
+
+            /* 10-bit state is always 2 bytes */
+            if (hdr.compressed_size < 2) return NETC_ERR_CORRUPT;
+            uint32_t initial_state = (uint32_t)netc_read_u16_le(payload);
+            if (initial_state < NETC_TANS_TABLE_SIZE_10 ||
+                initial_state >= 2U * NETC_TANS_TABLE_SIZE_10)
+                return NETC_ERR_CORRUPT;
+
+            /* Rescale 12-bit freq table to 10-bit and build decode table */
+            netc_freq_table_t freq10;
+            if (netc_freq_rescale_12_to_10(&tbl12->freq, &freq10) != 0)
+                return NETC_ERR_DICT_INVALID;
+            netc_tans_table_10_t tbl10;
+            if (netc_tans_build_10(&tbl10, &freq10) != 0)
+                return NETC_ERR_DICT_INVALID;
+
+            const uint8_t *bits = payload + 2;
+            size_t bits_sz = hdr.compressed_size - 2;
+            netc_bsr_t bsr;
+            netc_bsr_init(&bsr, bits, bits_sz);
+            if (netc_tans_decode_10(&tbl10, &bsr, (uint8_t *)dst,
+                                     hdr.original_size, initial_state) != 0)
+                return NETC_ERR_CORRUPT;
+
+            *dst_size = hdr.original_size;
+
+            /* Delta post-pass */
+            if ((hdr.flags & NETC_PKT_FLAG_DELTA) &&
+                ctx->prev_pkt != NULL &&
+                ctx->prev_pkt_size == *dst_size)
+            {
+                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
+                                           (uint8_t *)dst, *dst_size);
+            }
+
+            /* Update delta predictor */
+            if (ctx->prev_pkt != NULL) {
+                memcpy(ctx->prev_pkt, dst, *dst_size);
+                ctx->prev_pkt_size = *dst_size;
+            }
+            /* Ring buffer update */
+            decomp_ring_append(ctx, (const uint8_t *)dst, *dst_size);
+
+            if (ctx->flags & NETC_CFG_FLAG_STATS) {
+                ctx->stats.packets_decompressed++;
+                ctx->stats.bytes_in  += src_size;
+                ctx->stats.bytes_out += *dst_size;
+            }
+            ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            return NETC_OK;
+        }
+
         case NETC_ALG_RANS:
             return NETC_ERR_UNSUPPORTED;
 
@@ -725,6 +789,7 @@ netc_result_t netc_decompress_stateless(
     if ((alg_id & 0x0Fu) == NETC_ALG_TANS)      alg_id = NETC_ALG_TANS;
     if ((alg_id & 0x0Fu) == NETC_ALG_LZP)       alg_id = NETC_ALG_LZP;
     if ((alg_id & 0x0Fu) == NETC_ALG_TANS_PCTX) alg_id = NETC_ALG_TANS_PCTX;
+    if ((alg_id & 0x0Fu) == NETC_ALG_TANS_10)   alg_id = NETC_ALG_TANS_10;
 
     switch (alg_id) {
         case NETC_ALG_PASSTHRU: {
@@ -790,6 +855,39 @@ netc_result_t netc_decompress_stateless(
             if (r != NETC_OK) return r;
             netc_lzp_xor_unfilter((const uint8_t *)dst, *dst_size,
                                    dict->lzp_table, (uint8_t *)dst);
+            return NETC_OK;
+        }
+
+        case NETC_ALG_TANS_10: {
+            /* 10-bit tANS: stateless path.
+             * Wire format: [2B state (uint16 LE)][bitstream].
+             * Rescale 12-bit freq table to 10-bit, build table, decode. */
+            uint32_t bucket_sl = (uint32_t)(hdr.algorithm >> 4);
+            if (bucket_sl >= NETC_CTX_COUNT) bucket_sl = 0;
+            const netc_tans_table_t *tbl12_sl = &dict->tables[bucket_sl];
+            if (!tbl12_sl->valid) return NETC_ERR_DICT_INVALID;
+
+            if (hdr.compressed_size < 2) return NETC_ERR_CORRUPT;
+            uint32_t init_st = (uint32_t)netc_read_u16_le(payload);
+            if (init_st < NETC_TANS_TABLE_SIZE_10 ||
+                init_st >= 2U * NETC_TANS_TABLE_SIZE_10)
+                return NETC_ERR_CORRUPT;
+
+            netc_freq_table_t freq10_sl;
+            if (netc_freq_rescale_12_to_10(&tbl12_sl->freq, &freq10_sl) != 0)
+                return NETC_ERR_DICT_INVALID;
+            netc_tans_table_10_t tbl10_sl;
+            if (netc_tans_build_10(&tbl10_sl, &freq10_sl) != 0)
+                return NETC_ERR_DICT_INVALID;
+
+            const uint8_t *bits_sl = payload + 2;
+            size_t bits_sz_sl = hdr.compressed_size - 2;
+            netc_bsr_t bsr_sl;
+            netc_bsr_init(&bsr_sl, bits_sl, bits_sz_sl);
+            if (netc_tans_decode_10(&tbl10_sl, &bsr_sl, (uint8_t *)dst,
+                                     hdr.original_size, init_st) != 0)
+                return NETC_ERR_CORRUPT;
+            *dst_size = hdr.original_size;
             return NETC_OK;
         }
 

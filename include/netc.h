@@ -145,6 +145,15 @@ typedef enum netc_result {
  *  Requires a v4+ dictionary with an LZP table trained via netc_dict_train(). */
 #define NETC_ALG_LZP      0x05U
 
+/** 10-bit tANS — small-packet optimization (v0.6+).
+ *  Uses 1024-entry tables instead of 4096, reducing per-symbol overhead
+ *  for infrequent symbols and improving L1 cache utilization.
+ *  Wire format: [2B state (uint16)][bitstream].
+ *  State range: [1024, 2048) — always fits uint16 (11 bits).
+ *  Adaptive: compressor tries both 12-bit and 10-bit tables for packets
+ *  <=128B and keeps whichever produces smaller output. */
+#define NETC_ALG_TANS_10  0x06U
+
 /** Uncompressed passthrough (incompressible data, AD-006). */
 #define NETC_ALG_PASSTHRU 0xFFU
 

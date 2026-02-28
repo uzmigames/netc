@@ -498,3 +498,254 @@ int netc_tans_decode_pctx(
 
     return 0;
 }
+
+/* =========================================================================
+ * netc_freq_rescale_12_to_10
+ *
+ * Rescales a 4096-sum frequency table to a 1024-sum frequency table.
+ * Algorithm:
+ *   1. Count non-zero symbols and scale each freq proportionally.
+ *   2. Clamp non-zero symbols to minimum frequency 1.
+ *   3. Adjust the largest symbol to absorb any rounding error.
+ * ========================================================================= */
+
+int netc_freq_rescale_12_to_10(const netc_freq_table_t *freq12,
+                               netc_freq_table_t       *freq10)
+{
+    if (freq12 == NULL || freq10 == NULL) return -1;
+
+    /* Verify input sums to 4096 */
+    uint32_t total12 = 0;
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        total12 += freq12->freq[s];
+    }
+    if (total12 != NETC_TANS_TABLE_SIZE) return -1;
+
+    /* Pass 1: Proportional scaling with rounding, clamped to min 1 for non-zero */
+    uint32_t total10 = 0;
+    int      largest_sym = -1;
+    uint32_t largest_freq12 = 0;
+
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        if (freq12->freq[s] == 0) {
+            freq10->freq[s] = 0;
+            continue;
+        }
+        /* Scale: freq10 = round(freq12 * 1024 / 4096) = round(freq12 / 4) */
+        uint32_t scaled = (uint32_t)(((uint64_t)freq12->freq[s] * NETC_TANS_TABLE_SIZE_10
+                           + NETC_TANS_TABLE_SIZE / 2) / NETC_TANS_TABLE_SIZE);
+        if (scaled == 0) scaled = 1;  /* minimum frequency for non-zero symbols */
+        freq10->freq[s] = (uint16_t)scaled;
+        total10 += scaled;
+
+        /* Track the largest symbol (by 12-bit freq) for adjustment */
+        if (freq12->freq[s] > largest_freq12) {
+            largest_freq12 = freq12->freq[s];
+            largest_sym = s;
+        }
+    }
+
+    /* Pass 2: Adjust the largest symbol to hit exactly 1024 */
+    if (largest_sym < 0) return -1;  /* no non-zero symbols */
+
+    int32_t diff = (int32_t)NETC_TANS_TABLE_SIZE_10 - (int32_t)total10;
+    int32_t new_freq = (int32_t)freq10->freq[largest_sym] + diff;
+    if (new_freq < 1) {
+        /* Adjustment would make the largest symbol < 1.
+         * This can only happen with extreme distributions — redistribute. */
+        freq10->freq[largest_sym] = 1;
+        total10 = 0;
+        for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+            total10 += freq10->freq[s];
+        }
+        diff = (int32_t)NETC_TANS_TABLE_SIZE_10 - (int32_t)total10;
+        for (int s = 0; diff != 0 && s < (int)NETC_TANS_SYMBOLS; s++) {
+            if (s == largest_sym || freq10->freq[s] == 0) continue;
+            if (diff > 0) {
+                freq10->freq[s]++;
+                diff--;
+            } else if (freq10->freq[s] > 1) {
+                freq10->freq[s]--;
+                diff++;
+            }
+        }
+    } else {
+        freq10->freq[largest_sym] = (uint16_t)new_freq;
+    }
+
+    return 0;
+}
+
+/* =========================================================================
+ * netc_tans_build_10
+ *
+ * 10-bit variant of netc_tans_build.
+ * Uses TABLE_SIZE_10 (1024), TABLE_LOG_10 (10), SPREAD_STEP_10 (643).
+ * ========================================================================= */
+
+int netc_tans_build_10(netc_tans_table_10_t *tbl, const netc_freq_table_t *freq) {
+    if (tbl == NULL || freq == NULL) return -1;
+
+    /* Validate sum */
+    uint32_t total = 0;
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        total += freq->freq[s];
+    }
+    if (total != NETC_TANS_TABLE_SIZE_10) return -1;
+
+    memcpy(&tbl->freq, freq, sizeof(netc_freq_table_t));
+    memset(tbl->decode,       0, sizeof(tbl->decode));
+    memset(tbl->encode_state, 0, sizeof(tbl->encode_state));
+    memset(tbl->encode,       0, sizeof(tbl->encode));
+
+    /* --- Step 1: Compute cumulative frequencies --- */
+    uint16_t cumul[NETC_TANS_SYMBOLS + 1];
+    cumul[0] = 0;
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        cumul[s + 1] = (uint16_t)(cumul[s] + freq->freq[s]);
+    }
+
+    /* --- Step 2: Build encode entries per symbol --- */
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        if (freq->freq[s] == 0) continue;
+        uint32_t f = freq->freq[s];
+        int fl     = floor_log2_u32(f);
+        int nb_hi  = (int)NETC_TANS_TABLE_LOG_10 - fl;
+        if (nb_hi < 0) nb_hi = 0;
+        tbl->encode[s].freq  = (uint16_t)f;
+        tbl->encode[s].nb_hi = (uint8_t)nb_hi;
+        tbl->encode[s].lower = (uint16_t)(f << (uint32_t)nb_hi);
+        tbl->encode[s].cumul = cumul[s];
+    }
+
+    /* --- Step 3: Generate spread table using FSE step function ---
+     * step = 643. GCD(643, 1024) = 1, so all 1024 positions are visited. */
+    uint8_t  spread_sym[NETC_TANS_TABLE_SIZE_10];
+    uint16_t rank[NETC_TANS_SYMBOLS];
+    memset(rank, 0, sizeof(rank));
+    memset(spread_sym, 0, sizeof(spread_sym));
+
+    uint32_t pos = 0;
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        if (freq->freq[s] == 0) continue;
+        uint32_t f = freq->freq[s];
+        for (uint32_t k = 0; k < f; k++) {
+            spread_sym[pos] = (uint8_t)s;
+            tbl->encode_state[cumul[s] + k] = (uint16_t)(NETC_TANS_TABLE_SIZE_10 + pos);
+            pos = (pos + NETC_TANS_SPREAD_STEP_10) & (NETC_TANS_TABLE_SIZE_10 - 1U);
+        }
+    }
+
+    /* --- Step 4: Build decode table --- */
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) rank[s] = 0;
+    (void)spread_sym; /* used implicitly above */
+
+    pos = 0;
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
+        if (freq->freq[s] == 0) continue;
+        uint32_t f = freq->freq[s];
+        for (uint32_t k = 0; k < f; k++) {
+            uint32_t X_prev = f + k;
+            int nb_j = (int)NETC_TANS_TABLE_LOG_10 - floor_log2_u32(X_prev);
+            if (nb_j < 0) nb_j = 0;
+
+            tbl->decode[pos].symbol         = (uint8_t)s;
+            tbl->decode[pos].nb_bits        = (uint8_t)nb_j;
+            tbl->decode[pos].next_state_base = (uint16_t)(X_prev << (uint32_t)nb_j);
+
+            pos = (pos + NETC_TANS_SPREAD_STEP_10) & (NETC_TANS_TABLE_SIZE_10 - 1U);
+        }
+    }
+
+    tbl->valid = 1;
+    return 0;
+}
+
+/* =========================================================================
+ * netc_tans_encode_10
+ *
+ * 10-bit variant of netc_tans_encode.
+ * State range: [1024, 2048).
+ * Returns final state (initial state for decoder), or 0 on error.
+ * ========================================================================= */
+
+uint32_t netc_tans_encode_10(
+    const netc_tans_table_10_t *tbl,
+    const uint8_t              *src,
+    size_t                      src_size,
+    netc_bsw_t                 *bsw,
+    uint32_t                    initial_state)
+{
+    if (!tbl || !tbl->valid || !src || !bsw || src_size == 0) return 0;
+
+    uint32_t X = initial_state;
+    if (X < NETC_TANS_TABLE_SIZE_10) X = NETC_TANS_TABLE_SIZE_10;
+
+    for (size_t i = src_size; i-- > 0; ) {
+        uint8_t sym = src[i];
+
+        const netc_tans_encode_entry_t *e = &tbl->encode[sym];
+        uint32_t f     = e->freq;
+        uint32_t lower = e->lower;
+        int      nb_hi = (int)e->nb_hi;
+
+        if (f == 0) return 0; /* symbol not in table */
+
+        int      nb = (nb_hi == 0 || X >= lower) ? nb_hi : nb_hi - 1;
+        uint32_t j  = (X >> (uint32_t)nb) - f;
+
+        if (nb > 0) {
+            if (netc_bsw_write(bsw, X & ((1U << (uint32_t)nb) - 1U), nb) != 0)
+                return 0;
+        }
+
+        X = (uint32_t)tbl->encode_state[(uint32_t)e->cumul + j];
+    }
+
+    return X;
+}
+
+/* =========================================================================
+ * netc_tans_decode_10
+ *
+ * 10-bit variant of netc_tans_decode.
+ * State range: [1024, 2048).
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_10(
+    const netc_tans_table_10_t *tbl,
+    netc_bsr_t                 *bsr,
+    uint8_t                    *dst,
+    size_t                      dst_size,
+    uint32_t                    initial_state)
+{
+    if (!tbl || !tbl->valid || !bsr || !dst || dst_size == 0) return -1;
+
+    uint32_t X = initial_state;
+
+    if (X < NETC_TANS_TABLE_SIZE_10 || X >= 2U * NETC_TANS_TABLE_SIZE_10) return -1;
+
+    NETC_PREFETCH(&tbl->decode[X - NETC_TANS_TABLE_SIZE_10]);
+
+    for (size_t i = 0; i < dst_size; i++) {
+        uint32_t slot = X - NETC_TANS_TABLE_SIZE_10;
+        const netc_tans_decode_entry_t *d = &tbl->decode[slot];
+
+        dst[i] = d->symbol;
+
+        int      nb       = d->nb_bits;
+        uint32_t bits_val = 0;
+        if (nb > 0) {
+            if (netc_bsr_read(bsr, nb, &bits_val) != 0) return -1;
+        }
+
+        X = (uint32_t)d->next_state_base + bits_val;
+
+        if (i + 1 < dst_size) {
+            NETC_PREFETCH(&tbl->decode[X - NETC_TANS_TABLE_SIZE_10]);
+        }
+    }
+
+    return 0;
+}

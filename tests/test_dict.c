@@ -35,18 +35,21 @@
 #include <stdint.h>
 
 /* Match the blob size from netc_dict.c */
-#define NETC_CTX_COUNT        16U
-#define NETC_BIGRAM_CTX_COUNT  4U
-#define NETC_TANS_SYMBOLS     256U
-#define NETC_TANS_TABLE_SIZE  4096U
-#define NETC_LZP_HT_SIZE     131072U
-/* v3 (no LZP): 8 + 16*256*2 + 16*4*256*2 + 4 = 40972 */
-#define EXPECTED_BLOB_SIZE_V3  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
-                                NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
-/* v4 with LZP: base(40968) + 4 + 131072*2 + 4 = 303120 */
-#define EXPECTED_BLOB_SIZE_V4  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
-                                NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
-                                4U + NETC_LZP_HT_SIZE * 2U + 4U)
+#define NETC_CTX_COUNT            16U
+#define NETC_BIGRAM_CTX_COUNT      8U    /* v5: 8 trained classes */
+#define NETC_BIGRAM_CTX_COUNT_V4   4U    /* v4: 4 static classes */
+#define NETC_TANS_SYMBOLS        256U
+#define NETC_TANS_TABLE_SIZE     4096U
+#define NETC_LZP_HT_SIZE        131072U
+/* v5 no LZP: 8 + 256 + 16*256*2 + 16*8*256*2 + 4 = 73996 */
+#define EXPECTED_BLOB_SIZE_V5_NOLZP (8U + 256U + \
+                                     NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                                     NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
+/* v5 with LZP: 73992 + 4 + 131072*2 + 4 = 336144 */
+#define EXPECTED_BLOB_SIZE_V5_LZP  (8U + 256U + \
+                                    NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                                    NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                                    4U + NETC_LZP_HT_SIZE * 2U + 4U)
 
 /* =========================================================================
  * Sample training data — representative byte sequences
@@ -246,7 +249,7 @@ void test_save_blob_size(void) {
     TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &sz));
     TEST_ASSERT_NOT_NULL(blob);
     /* v4 with LZP table */
-    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V4, sz);
+    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V5_LZP, sz);
 
     netc_dict_free(d);
     netc_dict_free_blob(blob);
@@ -282,10 +285,10 @@ void test_load_null_data(void) {
 }
 
 void test_load_null_out(void) {
-    uint8_t *buf = (uint8_t *)calloc(1, EXPECTED_BLOB_SIZE_V4);
+    uint8_t *buf = (uint8_t *)calloc(1, EXPECTED_BLOB_SIZE_V5_LZP);
     TEST_ASSERT_NOT_NULL(buf);
     TEST_ASSERT_EQUAL_INT(NETC_ERR_INVALID_ARG,
-        netc_dict_load(buf, EXPECTED_BLOB_SIZE_V4, NULL));
+        netc_dict_load(buf, EXPECTED_BLOB_SIZE_V5_LZP, NULL));
     free(buf);
 }
 
@@ -298,12 +301,12 @@ void test_load_short_blob(void) {
 }
 
 void test_load_wrong_magic(void) {
-    uint8_t *buf = (uint8_t *)calloc(1, EXPECTED_BLOB_SIZE_V4);
+    uint8_t *buf = (uint8_t *)calloc(1, EXPECTED_BLOB_SIZE_V5_LZP);
     TEST_ASSERT_NOT_NULL(buf);
     buf[0] = 0xDE; buf[1] = 0xAD; buf[2] = 0xBE; buf[3] = 0xEF;
     netc_dict_t *d = NULL;
     TEST_ASSERT_EQUAL_INT(NETC_ERR_DICT_INVALID,
-        netc_dict_load(buf, EXPECTED_BLOB_SIZE_V4, &d));
+        netc_dict_load(buf, EXPECTED_BLOB_SIZE_V5_LZP, &d));
     TEST_ASSERT_NULL(d);
     free(buf);
 }
@@ -398,7 +401,7 @@ void test_roundtrip_with_training_data(void) {
     void *blob = NULL;
     size_t sz = 0;
     TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(src, &blob, &sz));
-    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V4, sz);
+    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V5_LZP, sz);
 
     netc_dict_t *loaded = NULL;
     TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_load(blob, sz, &loaded));
@@ -407,6 +410,179 @@ void test_roundtrip_with_training_data(void) {
 
     netc_dict_free(src);
     netc_dict_free(loaded);
+    netc_dict_free_blob(blob);
+}
+
+/* =========================================================================
+ * v5 bigram class_map: trained 8-class quantization
+ * ========================================================================= */
+
+void test_v5_classmap_in_blob(void) {
+    /* Train a dict, save, verify the class_map is present in the v5 blob.
+     * v5 blob layout: [0..7] header, [8..263] class_map, [264..] freq tables. */
+    netc_dict_t *d = NULL;
+    const uint8_t *pkts[] = { PKT_A, PKT_B, PKT_C };
+    size_t         szs[]  = { sizeof(PKT_A), sizeof(PKT_B), sizeof(PKT_C) };
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_dict_train(pkts, szs, 3, 20, &d));
+    TEST_ASSERT_NOT_NULL(d);
+
+    void *blob = NULL;
+    size_t sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &sz));
+    TEST_ASSERT_NOT_NULL(blob);
+
+    /* Verify version = 5 in blob */
+    const uint8_t *b = (const uint8_t *)blob;
+    TEST_ASSERT_EQUAL_UINT8(5, b[4]);
+
+    /* Verify class_map values are all in range [0..7] */
+    for (int i = 0; i < 256; i++) {
+        TEST_ASSERT_TRUE(b[8 + i] < 8);
+    }
+
+    /* Each class should have exactly 32 entries (256 / 8 = 32) */
+    int class_counts[8] = {0};
+    for (int i = 0; i < 256; i++) {
+        class_counts[b[8 + i]]++;
+    }
+    for (int c = 0; c < 8; c++) {
+        TEST_ASSERT_EQUAL_INT(32, class_counts[c]);
+    }
+
+    netc_dict_free(d);
+    netc_dict_free_blob(blob);
+}
+
+void test_v5_roundtrip_classmap_preserved(void) {
+    /* Train → save → load: verify class_map is preserved across round-trip. */
+    netc_dict_t *d = NULL;
+    const uint8_t *pkts[] = { PKT_A, PKT_B, PKT_C };
+    size_t         szs[]  = { sizeof(PKT_A), sizeof(PKT_B), sizeof(PKT_C) };
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_dict_train(pkts, szs, 3, 33, &d));
+
+    void *blob = NULL;
+    size_t sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &sz));
+
+    netc_dict_t *loaded = NULL;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_load(blob, sz, &loaded));
+    TEST_ASSERT_NOT_NULL(loaded);
+
+    /* Verify all 256 class_map entries match after round-trip.
+     * We access the blob directly to compare since the struct is opaque.
+     * After loading, re-save and compare the class_map region. */
+    void *blob2 = NULL;
+    size_t sz2 = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(loaded, &blob2, &sz2));
+    TEST_ASSERT_EQUAL_UINT(sz, sz2);
+
+    /* Compare class_map region: bytes [8..263] */
+    const uint8_t *b1 = (const uint8_t *)blob;
+    const uint8_t *b2 = (const uint8_t *)blob2;
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(b1 + 8, b2 + 8, 256);
+
+    netc_dict_free(d);
+    netc_dict_free(loaded);
+    netc_dict_free_blob(blob);
+    netc_dict_free_blob(blob2);
+}
+
+void test_v5_blob_size_no_lzp_training(void) {
+    /* When trained with zero packets, LZP is still trained (all entries invalid).
+     * The blob should have the v5 LZP size. */
+    netc_dict_t *d = NULL;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_dict_train(NULL, NULL, 0, 42, &d));
+    TEST_ASSERT_NOT_NULL(d);
+
+    void *blob = NULL;
+    size_t sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &sz));
+    /* Training always produces LZP table, so blob has LZP section */
+    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V5_LZP, sz);
+
+    netc_dict_free(d);
+    netc_dict_free_blob(blob);
+}
+
+void test_v5_8class_compress_decompress_roundtrip(void) {
+    /* Train dict with data, then compress and decompress using bigram mode.
+     * This exercises the full 8-class pipeline: trained class_map → compress →
+     * save/load dict → decompress → verify data integrity. */
+    netc_dict_t *d = NULL;
+    const uint8_t *pkts[] = { PKT_A, PKT_B, PKT_C };
+    size_t         szs[]  = { sizeof(PKT_A), sizeof(PKT_B), sizeof(PKT_C) };
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_dict_train(pkts, szs, 3, 10, &d));
+    TEST_ASSERT_NOT_NULL(d);
+
+    /* Save and reload dict (proves serialization round-trip) */
+    void *blob = NULL;
+    size_t blob_sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &blob_sz));
+
+    netc_dict_t *loaded = NULL;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_load(blob, blob_sz, &loaded));
+    TEST_ASSERT_NOT_NULL(loaded);
+
+    /* Create compressor context with bigram + compact header enabled */
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_BIGRAM | NETC_CFG_FLAG_COMPACT_HDR;
+    netc_ctx_t *ctx = netc_ctx_create(loaded, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    /* Compress PKT_A */
+    uint8_t compressed[1024];
+    size_t comp_sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx, PKT_A, sizeof(PKT_A),
+                      compressed, sizeof(compressed), &comp_sz));
+    TEST_ASSERT_TRUE(comp_sz > 0);
+
+    /* Decompress */
+    uint8_t decompressed[256];
+    size_t decomp_sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx, compressed, comp_sz,
+                        decompressed, sizeof(decompressed), &decomp_sz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(PKT_A), decomp_sz);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(PKT_A, decompressed, sizeof(PKT_A));
+
+    /* Also test PKT_C (256B, highly compressible) */
+    comp_sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx, PKT_C, sizeof(PKT_C),
+                      compressed, sizeof(compressed), &comp_sz));
+    decomp_sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx, compressed, comp_sz,
+                        decompressed, sizeof(decompressed), &decomp_sz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(PKT_C), decomp_sz);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(PKT_C, decompressed, sizeof(PKT_C));
+
+    netc_ctx_destroy(ctx);
+    netc_dict_free(d);
+    netc_dict_free(loaded);
+    netc_dict_free_blob(blob);
+}
+
+void test_v5_version_byte_in_trained_dict(void) {
+    /* Verify that newly trained dicts always have version=5. */
+    netc_dict_t *d = NULL;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_dict_train(NULL, NULL, 0, 1, &d));
+
+    void *blob = NULL;
+    size_t sz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &sz));
+
+    const uint8_t *b = (const uint8_t *)blob;
+    TEST_ASSERT_EQUAL_UINT8(5, b[4]);
+
+    netc_dict_free(d);
     netc_dict_free_blob(blob);
 }
 
@@ -476,6 +652,13 @@ int main(void) {
     /* Round-trip */
     RUN_TEST(test_roundtrip_empty_training);
     RUN_TEST(test_roundtrip_with_training_data);
+
+    /* v5 bigram class_map */
+    RUN_TEST(test_v5_classmap_in_blob);
+    RUN_TEST(test_v5_roundtrip_classmap_preserved);
+    RUN_TEST(test_v5_blob_size_no_lzp_training);
+    RUN_TEST(test_v5_8class_compress_decompress_roundtrip);
+    RUN_TEST(test_v5_version_byte_in_trained_dict);
 
     /* model_id accessor */
     RUN_TEST(test_model_id_null_dict);

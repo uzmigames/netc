@@ -3,9 +3,14 @@
  *
  * INTERNAL HEADER — not part of the public API.
  *
- * Table-based software CRC32. Phase 4 (SIMD) will add hardware-accelerated
- * paths via _mm_crc32_u8 (SSE4.2) selected through the dispatch table.
- * All paths produce identical results.
+ * Canonical IEEE CRC32 implementation (polynomial 0xEDB88320 reflected).
+ * All SIMD dispatch paths (generic, SSE4.2, NEON) produce identical IEEE
+ * CRC32 output, ensuring portable dictionary checksums across platforms.
+ *
+ * The SIMD dispatch table (netc_simd_ops_t.crc32_update) routes through
+ * this implementation. SSE4.2's _mm_crc32_u* computes CRC32C (Castagnoli),
+ * a DIFFERENT polynomial, so the SSE42 slot delegates to generic software.
+ * ARM NEON (ARMv8.1+ __crc32d) natively computes IEEE CRC32.
  */
 
 #ifndef NETC_CRC32_H

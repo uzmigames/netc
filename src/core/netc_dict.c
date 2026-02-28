@@ -4,23 +4,29 @@
  * Phase 2: Real byte frequency counting per context bucket, ANS probability
  * normalization, tANS table construction, and full blob serialization.
  *
- * Serialized blob layout (version 4):
- *   [0..3]   magic       (uint32 LE)  = NETC_DICT_MAGIC
- *   [4]      version     (uint8)      = NETC_DICT_VERSION (4)
- *   [5]      model_id    (uint8)
- *   [6]      ctx_count   (uint8)      = NETC_CTX_COUNT (16)
- *   [7]      dict_flags  (uint8)      = NETC_DICT_FLAG_* bitmask
- *   [8..]    unigram freq tables: NETC_CTX_COUNT × 256 × uint16 LE
- *            = 16 × 512 = 8192 bytes
- *   [8200..] bigram freq tables: NETC_CTX_COUNT × NETC_BIGRAM_CTX_COUNT × 256 × uint16 LE
- *            = 16 × 4 × 512 = 32768 bytes
+ * Serialized blob layout (version 5):
+ *   [0..3]     magic           (uint32 LE)  = NETC_DICT_MAGIC
+ *   [4]        version         (uint8)      = 5
+ *   [5]        model_id        (uint8)
+ *   [6]        ctx_count       (uint8)      = NETC_CTX_COUNT (16)
+ *   [7]        dict_flags      (uint8)      = NETC_DICT_FLAG_* bitmask
+ *   [8..263]   bigram_class_map[256]         (NEW in v5)
+ *   [264..]    unigram freq tables: 16 × 256 × uint16 LE = 8192 bytes
+ *   [8456..]   bigram freq tables: 16 × 8 × 256 × uint16 LE = 65536 bytes
  *   IF NETC_DICT_FLAG_LZP set:
- *     [40968..40971] lzp_ht_size  (uint32 LE) = NETC_LZP_HT_SIZE (131072)
- *     [40972..]      LZP entries  (value + valid, 2B each) × lzp_ht_size
- *   [last 4] checksum (uint32 LE, CRC32 of all preceding bytes)
+ *     [73992..73995] lzp_ht_size (uint32 LE) = NETC_LZP_HT_SIZE (131072)
+ *     [73996..]      LZP entries (2B each) × lzp_ht_size
+ *   [last 4]   checksum (uint32 LE, CRC32 of all preceding bytes)
  *
- * Base blob size (no LZP): 8 + 8192 + 32768 + 4 = 40972 bytes.
- * With LZP: 40968 + 4 + 131072*2 + 4 = 303120 bytes.
+ * v5 base (no LZP): 8 + 256 + 8192 + 65536 + 4 = 73996 bytes.
+ * v5 with LZP: 73992 + 4 + 131072*2 + 4 = 336144 bytes.
+ *
+ * v4 blob layout (backward-compat loading):
+ *   [0..7]     header (same as v5, version=4)
+ *   [8..]      unigram freq: 16 × 256 × 2 = 8192B
+ *   [8200..]   bigram freq: 16 × 4 × 256 × 2 = 32768B (4 classes, not 8)
+ *   [40968..]  LZP section (if present)
+ *   [last 4]   checksum
  */
 
 #include "netc_internal.h"
@@ -36,22 +42,33 @@
 #define DICT_HEADER_SIZE      8U
 /* Unigram frequency table section: NETC_CTX_COUNT buckets × 256 × sizeof(uint16) */
 #define DICT_FREQ_BYTES       (NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U)  /* 16*512=8192 */
-/* Bigram frequency table section: NETC_CTX_COUNT × NETC_BIGRAM_CTX_COUNT × 256 × sizeof(uint16) */
-#define DICT_BIGRAM_BYTES     (NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U) /* 16*4*512=32768 */
-/* Base size before optional LZP section and checksum */
-#define DICT_BASE_SIZE        (DICT_HEADER_SIZE + DICT_FREQ_BYTES + DICT_BIGRAM_BYTES) /* 40968 */
-#define DICT_BIGRAM_OFF       (DICT_HEADER_SIZE + DICT_FREQ_BYTES)  /* 8200 */
-/* v3 (no LZP) blob size: base + checksum */
-#define DICT_V3_BLOB_SIZE     (DICT_BASE_SIZE + 4U)  /* 40972 */
 /* LZP section: 4B lzp_ht_size + entries (2 bytes each) */
 #define DICT_LZP_ENTRY_BYTES  2U
 #define DICT_LZP_SECTION_SIZE (4U + NETC_LZP_HT_SIZE * DICT_LZP_ENTRY_BYTES)  /* 262148 */
-/* v4 with LZP blob size: base + lzp_section + checksum */
-#define DICT_V4_LZP_BLOB_SIZE (DICT_BASE_SIZE + DICT_LZP_SECTION_SIZE + 4U)  /* 303120 */
 
-/* Compute blob size from dict_flags */
-static size_t dict_blob_size(uint8_t dict_flags) {
-    size_t sz = DICT_BASE_SIZE;
+/* ----- v4 layout constants (backward-compat) ----- */
+/* Bigram freq: 16 × 4 × 256 × 2 = 32768 */
+#define DICT_V4_BIGRAM_BYTES  (NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT_V4 * NETC_TANS_SYMBOLS * 2U)
+#define DICT_V4_BASE_SIZE     (DICT_HEADER_SIZE + DICT_FREQ_BYTES + DICT_V4_BIGRAM_BYTES)  /* 40968 */
+/* v3 (no LZP) minimum blob: base + checksum = 40972 */
+#define DICT_V3_BLOB_SIZE     (DICT_V4_BASE_SIZE + 4U)
+
+/* ----- v5 layout constants ----- */
+/* Class map: 256 bytes immediately after header */
+#define DICT_V5_CLASSMAP_SIZE 256U
+/* Bigram freq: 16 × 8 × 256 × 2 = 65536 */
+#define DICT_V5_BIGRAM_BYTES  (NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U)
+/* v5 base: header(8) + class_map(256) + unigram(8192) + bigram(65536) = 73992 */
+#define DICT_V5_BASE_SIZE     (DICT_HEADER_SIZE + DICT_V5_CLASSMAP_SIZE + DICT_FREQ_BYTES + DICT_V5_BIGRAM_BYTES)
+
+/* Compute blob size from version + dict_flags */
+static size_t dict_blob_size_v(uint8_t version, uint8_t dict_flags) {
+    size_t sz;
+    if (version >= 5U) {
+        sz = DICT_V5_BASE_SIZE;
+    } else {
+        sz = DICT_V4_BASE_SIZE;
+    }
     if (dict_flags & NETC_DICT_FLAG_LZP) sz += DICT_LZP_SECTION_SIZE;
     sz += 4U; /* checksum */
     return sz;
@@ -149,14 +166,89 @@ netc_result_t netc_dict_train(
     d->ctx_count  = (uint8_t)NETC_CTX_COUNT;
     d->dict_flags = 0;
     d->lzp_table  = NULL;
+    d->bigram_class_count = NETC_BIGRAM_CTX_COUNT;  /* 8 */
 
-    /* --- Phase 2: accumulate byte frequencies per context bucket --- */
+    /* --- Phase 2a: accumulate unigram byte frequencies per context bucket --- */
     uint64_t raw[NETC_CTX_COUNT][NETC_TANS_SYMBOLS];
     uint64_t totals[NETC_CTX_COUNT];
     memset(raw,    0, sizeof(raw));
     memset(totals, 0, sizeof(totals));
 
-    /* Bigram raw counts: [bucket][bigram_class][symbol] */
+    for (size_t p = 0; p < count; p++) {
+        if (packets[p] == NULL || sizes[p] == 0) continue;
+        size_t pkt_size = sizes[p];
+        if (pkt_size > NETC_MAX_PACKET_SIZE) pkt_size = NETC_MAX_PACKET_SIZE;
+        const uint8_t *pkt = packets[p];
+        for (size_t i = 0; i < pkt_size; i++) {
+            uint32_t bucket = netc_ctx_bucket((uint32_t)i);
+            raw[bucket][pkt[i]]++;
+            totals[bucket]++;
+        }
+    }
+
+    /* --- Phase 2b: build bigram class_map via frequency-based clustering --- */
+    /* For each prev_byte value (0-255), compute the most-frequent next-symbol
+     * (aggregated across all buckets). Sort prev_bytes by their most-frequent
+     * symbol index, then divide into 8 equal groups of 32. */
+    {
+        /* cond_peak[prev] = the symbol that occurs most often after prev (all buckets) */
+        uint16_t cond_peak[256];
+        /* Per prev_byte, accumulate total next-symbol counts across all buckets */
+        uint64_t *cond_counts = (uint64_t *)calloc(256, 256 * sizeof(uint64_t));
+        if (NETC_UNLIKELY(cond_counts == NULL)) {
+            free(d);
+            return NETC_ERR_NOMEM;
+        }
+
+        for (size_t p = 0; p < count; p++) {
+            if (packets[p] == NULL || sizes[p] == 0) continue;
+            size_t pkt_size = sizes[p];
+            if (pkt_size > NETC_MAX_PACKET_SIZE) pkt_size = NETC_MAX_PACKET_SIZE;
+            const uint8_t *pkt = packets[p];
+            for (size_t i = 0; i < pkt_size; i++) {
+                uint8_t prev = (i > 0) ? pkt[i - 1] : 0x00u;
+                cond_counts[(size_t)prev * 256 + pkt[i]]++;
+            }
+        }
+
+        /* Find the peak symbol for each prev_byte */
+        for (uint32_t prev = 0; prev < 256; prev++) {
+            uint64_t best = 0;
+            uint16_t best_sym = 0;
+            for (uint32_t s = 0; s < 256; s++) {
+                uint64_t c = cond_counts[(size_t)prev * 256 + s];
+                if (c > best) { best = c; best_sym = (uint16_t)s; }
+            }
+            cond_peak[prev] = best_sym;
+        }
+        free(cond_counts);
+
+        /* Sort prev_byte indices by their peak symbol to cluster similar contexts.
+         * Simple insertion sort on 256 elements (indices 0-255). */
+        uint16_t sorted_prev[256];
+        for (uint32_t i = 0; i < 256; i++) sorted_prev[i] = (uint16_t)i;
+        for (uint32_t i = 1; i < 256; i++) {
+            uint16_t key = sorted_prev[i];
+            uint16_t key_peak = cond_peak[key];
+            int j = (int)i - 1;
+            while (j >= 0 && cond_peak[sorted_prev[j]] > key_peak) {
+                sorted_prev[j + 1] = sorted_prev[j];
+                j--;
+            }
+            sorted_prev[j + 1] = key;
+        }
+
+        /* Divide sorted prev_bytes into 8 equal groups of 32 */
+        for (uint32_t g = 0; g < NETC_BIGRAM_CTX_COUNT; g++) {
+            for (uint32_t k = 0; k < 32; k++) {
+                uint16_t prev_idx = sorted_prev[g * 32 + k];
+                d->bigram_class_map[prev_idx] = (uint8_t)g;
+            }
+        }
+    }
+
+    /* --- Phase 2c: accumulate bigram frequencies using trained class_map --- */
+    /* Bigram raw counts: [bucket][bigram_class][symbol] — now 8 classes */
     uint64_t (*bgram_raw)[NETC_BIGRAM_CTX_COUNT][NETC_TANS_SYMBOLS] =
         (uint64_t (*)[NETC_BIGRAM_CTX_COUNT][NETC_TANS_SYMBOLS])
         calloc(NETC_CTX_COUNT, sizeof((*bgram_raw)));
@@ -175,12 +267,9 @@ netc_result_t netc_dict_train(
         for (size_t i = 0; i < pkt_size; i++) {
             uint32_t bucket = netc_ctx_bucket((uint32_t)i);
             uint8_t sym = pkt[i];
-            raw[bucket][sym]++;
-            totals[bucket]++;
-            /* Bigram: accumulate (prev_byte, curr_byte) counts.
-             * For i==0 use 0x00 as the implicit "start of packet" previous byte. */
+            /* Use trained class_map for bigram context */
             uint8_t prev = (i > 0) ? pkt[i - 1] : 0x00u;
-            uint32_t bclass = netc_bigram_class(prev);
+            uint32_t bclass = netc_bigram_class(prev, d->bigram_class_map);
             bgram_raw[bucket][bclass][sym]++;
             bgram_totals[bucket][bclass]++;
         }
@@ -354,7 +443,7 @@ netc_result_t netc_dict_train(
                 raw[bucket][sym]++;
                 totals[bucket]++;
                 uint8_t prev = (i > 0) ? filt_buf[i - 1] : 0x00u;
-                uint32_t bclass = netc_bigram_class(prev);
+                uint32_t bclass = netc_bigram_class(prev, d->bigram_class_map);
                 bgram_raw2[bucket][bclass][sym]++;
                 bgram_totals2[bucket][bclass]++;
             }
@@ -382,7 +471,7 @@ netc_result_t netc_dict_train(
     /* --- Compute checksum over the serialized blob --- */
     /* We compute the checksum from the blob representation for consistency
      * between train/save and load. Build the blob, compute, store. */
-    size_t blob_sz = dict_blob_size(d->dict_flags);
+    size_t blob_sz = dict_blob_size_v(d->version, d->dict_flags);
     uint8_t *tmp_blob = (uint8_t *)malloc(blob_sz);
     if (NETC_UNLIKELY(tmp_blob == NULL)) {
         free(d->lzp_table);
@@ -397,8 +486,13 @@ netc_result_t netc_dict_train(
     tmp_blob[6] = d->ctx_count;
     tmp_blob[7] = d->dict_flags;
 
-    /* Serialize unigram frequency tables */
     size_t off = 8;
+
+    /* v5: serialize bigram class map (256 bytes) */
+    memcpy(tmp_blob + off, d->bigram_class_map, 256);
+    off += 256;
+
+    /* Serialize unigram frequency tables */
     for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
         for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
             netc_write_u16_le(tmp_blob + off, d->tables[b].freq.freq[s]);
@@ -406,7 +500,7 @@ netc_result_t netc_dict_train(
         }
     }
 
-    /* Serialize bigram frequency sub-tables */
+    /* Serialize bigram frequency sub-tables (8 classes in v5) */
     for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
         for (uint32_t c = 0; c < NETC_BIGRAM_CTX_COUNT; c++) {
             for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
@@ -444,7 +538,7 @@ netc_result_t netc_dict_save(const netc_dict_t *dict, void **out, size_t *out_si
         return NETC_ERR_INVALID_ARG;
     }
 
-    size_t blob_sz = dict_blob_size(dict->dict_flags);
+    size_t blob_sz = dict_blob_size_v(dict->version, dict->dict_flags);
     uint8_t *blob = (uint8_t *)malloc(blob_sz);
     if (NETC_UNLIKELY(blob == NULL)) {
         return NETC_ERR_NOMEM;
@@ -457,6 +551,14 @@ netc_result_t netc_dict_save(const netc_dict_t *dict, void **out, size_t *out_si
     blob[7] = dict->dict_flags;
 
     size_t off = 8;
+
+    /* v5: serialize bigram class map (256 bytes) */
+    if (dict->version >= 5) {
+        memcpy(blob + off, dict->bigram_class_map, 256);
+        off += 256;
+    }
+
+    /* Serialize unigram frequency tables */
     for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
         for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
             netc_write_u16_le(blob + off, dict->tables[b].freq.freq[s]);
@@ -465,11 +567,14 @@ netc_result_t netc_dict_save(const netc_dict_t *dict, void **out, size_t *out_si
     }
 
     /* Serialize bigram sub-tables */
-    for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
-        for (uint32_t c = 0; c < NETC_BIGRAM_CTX_COUNT; c++) {
-            for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
-                netc_write_u16_le(blob + off, dict->bigram_tables[b][c].freq.freq[s]);
-                off += 2;
+    {
+        uint32_t n_classes = (dict->version >= 5) ? NETC_BIGRAM_CTX_COUNT : NETC_BIGRAM_CTX_COUNT_V4;
+        for (uint32_t b = 0; b < NETC_CTX_COUNT; b++) {
+            for (uint32_t c = 0; c < n_classes; c++) {
+                for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
+                    netc_write_u16_le(blob + off, dict->bigram_tables[b][c].freq.freq[s]);
+                    off += 2;
+                }
             }
         }
     }
@@ -499,7 +604,7 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
     if (NETC_UNLIKELY(data == NULL || out == NULL)) {
         return NETC_ERR_INVALID_ARG;
     }
-    /* Minimum blob size is DICT_V3_BLOB_SIZE (v3 without LZP) */
+    /* Minimum blob size is DICT_V3_BLOB_SIZE (v3/v4 without LZP) */
     if (NETC_UNLIKELY(size < DICT_V3_BLOB_SIZE)) {
         return NETC_ERR_DICT_INVALID;
     }
@@ -512,7 +617,7 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
     }
 
     uint8_t version = b[4];
-    /* Accept v3 and v4 dictionaries */
+    /* Accept v3, v4, and v5 dictionaries */
     if (NETC_UNLIKELY(version < 3 || version > NETC_DICT_VERSION)) {
         return NETC_ERR_VERSION;
     }
@@ -521,11 +626,11 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
         return NETC_ERR_VERSION;
     }
 
-    /* Read dict_flags (byte 7: _pad in v3, dict_flags in v4) */
+    /* Read dict_flags (byte 7: _pad in v3, dict_flags in v4+) */
     uint8_t dflags = b[7];
 
     /* Compute expected blob size and validate */
-    size_t expected_sz = dict_blob_size(dflags);
+    size_t expected_sz = dict_blob_size_v(version, dflags);
     if (NETC_UNLIKELY(size < expected_sz)) {
         return NETC_ERR_DICT_INVALID;
     }
@@ -550,8 +655,23 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
     d->lzp_table  = NULL;
     d->checksum   = stored_cksum;
 
-    /* Deserialize unigram frequency tables and rebuild tANS decode/encode tables */
     size_t off = 8;
+
+    /* v5: read trained bigram class map (256 bytes) */
+    if (version >= 5) {
+        memcpy(d->bigram_class_map, b + off, 256);
+        off += 256;
+        d->bigram_class_count = NETC_BIGRAM_CTX_COUNT;  /* 8 */
+    } else {
+        /* v3/v4: build default class_map from prev_byte >> 6.
+         * Maps to classes 0-3 only; classes 4-7 unused. */
+        for (uint32_t i = 0; i < 256; i++) {
+            d->bigram_class_map[i] = (uint8_t)(i >> 6);
+        }
+        d->bigram_class_count = NETC_BIGRAM_CTX_COUNT_V4;  /* 4 */
+    }
+
+    /* Deserialize unigram frequency tables and rebuild tANS decode/encode tables */
     for (uint32_t bucket = 0; bucket < NETC_CTX_COUNT; bucket++) {
         netc_freq_table_t ft;
         for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
@@ -564,17 +684,20 @@ netc_result_t netc_dict_load(const void *data, size_t size, netc_dict_t **out) {
         }
     }
 
-    /* Deserialize bigram sub-tables (v0.3+) */
-    for (uint32_t bucket = 0; bucket < NETC_CTX_COUNT; bucket++) {
-        for (uint32_t c = 0; c < NETC_BIGRAM_CTX_COUNT; c++) {
-            netc_freq_table_t ft;
-            for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
-                ft.freq[s] = netc_read_u16_le(b + off);
-                off += 2;
-            }
-            if (netc_tans_build(&d->bigram_tables[bucket][c], &ft) != 0) {
-                free(d);
-                return NETC_ERR_DICT_INVALID;
+    /* Deserialize bigram sub-tables */
+    {
+        uint32_t n_classes = (version >= 5) ? NETC_BIGRAM_CTX_COUNT : NETC_BIGRAM_CTX_COUNT_V4;
+        for (uint32_t bucket = 0; bucket < NETC_CTX_COUNT; bucket++) {
+            for (uint32_t c = 0; c < n_classes; c++) {
+                netc_freq_table_t ft;
+                for (uint32_t s = 0; s < NETC_TANS_SYMBOLS; s++) {
+                    ft.freq[s] = netc_read_u16_le(b + off);
+                    off += 2;
+                }
+                if (netc_tans_build(&d->bigram_tables[bucket][c], &ft) != 0) {
+                    free(d);
+                    return NETC_ERR_DICT_INVALID;
+                }
             }
         }
     }

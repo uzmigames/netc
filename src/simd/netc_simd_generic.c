@@ -18,6 +18,7 @@
  */
 
 #include "netc_simd.h"
+#include "../util/netc_crc32.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -210,30 +211,11 @@ void netc_freq_count_generic(const uint8_t *data, size_t len, uint32_t *freq)
     }
 }
 
-/* --- CRC32 (software, table-based) ---
- * Uses the standard CRC-32/ISO-HDLC polynomial (0xEDB88320 reflected). */
-static uint32_t s_crc32_table[256];
-static int      s_crc32_table_init = 0;
-
-static void crc32_table_build(void) {
-    for (uint32_t i = 0; i < 256u; i++) {
-        uint32_t c = i;
-        for (int k = 0; k < 8; k++) {
-            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        }
-        s_crc32_table[i] = c;
-    }
-    s_crc32_table_init = 1;
-}
+/* --- CRC32 (IEEE 802.3) ---
+ * Delegates to the canonical implementation in netc_crc32.c.
+ * This eliminates the duplicate lookup table that was previously here. */
 
 uint32_t netc_crc32_update_generic(uint32_t crc, const uint8_t *data, size_t len)
 {
-    if (!s_crc32_table_init) {
-        crc32_table_build();
-    }
-    crc = ~crc;
-    for (size_t i = 0; i < len; i++) {
-        crc = s_crc32_table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
-    }
-    return ~crc;
+    return netc_crc32_continue(crc, data, len);
 }

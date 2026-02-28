@@ -27,6 +27,13 @@ tmp/
 build/
 build-bench/
 build-trace/
+build-pgo-baseline/
+build-pgo-instrument/
+build-pgo-optimized/
+build-clang-baseline/
+build-clang-pgo/
+build-cov/
+build-test-gcc/
 dist/
 out/
 cmake-build-*/

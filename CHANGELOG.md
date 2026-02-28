@@ -15,15 +15,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **ANS state compaction** — when compact header is active, tANS initial state is encoded as `uint16` (2B) instead of `uint32` (4B). ANS state range [4096, 8192) fits in 13 bits. Saves 2B per packet on single-region tANS, 4B on dual-interleaved (X2) tANS.
 - **Packet type byte encoding** — single-byte structured encoding of `(flags, algorithm)` pairs replaces 2 separate header fields. 144 valid entries covering all tANS, LZP, PCTX, MREG, passthrough, and bucketed algorithm variants. Decode via const lookup table.
 - **LZP (Lempel-Ziv Prediction) XOR pre-filter** — position-aware order-1 context prediction. XOR each byte with its LZP prediction before tANS encoding; correctly predicted bytes become `0x00`, concentrating the distribution. Integrated into dict training (Boyer-Moore majority vote) and serialization (dict format v4).
-- **Bigram context model** (`NETC_CFG_FLAG_BIGRAM`) — order-1 bigram frequency tables trained per context bucket. 4 bigram tables (16 x 4 x 256 x uint16) added to dictionary.
-- **Dictionary format v4** — extends v3 with LZP hash table (131072 entries x 2 bytes = 256 KB) and dict_flags field. Backward-compatible: v3 dicts load without LZP.
+- **Bigram context model** (`NETC_CFG_FLAG_BIGRAM`) — order-1 bigram frequency tables trained per context bucket. 8 trained bigram classes (v5 dict, up from 4 static classes in v4). Class mapping trained from corpus: sort previous bytes by peak conditional symbol, divide into 8 groups of 32.
+- **Dictionary format v5** — extends v4 with trained 256-byte `bigram_class_map` and 8-class bigram tables (65536B vs 32768B for v4). Backward-compatible: v4 dicts load with default `prev >> 6` class mapping and 4-class tables.
 - **Delta-LZP comparison** — for packets ≤ 512B, when delta+tANS succeeds and an LZP table is available, also tries LZP-only on raw (non-delta) bytes. Uses the smaller result. Improves compression by 2-8% on structured game packets where position-aware LZP predictions outperform inter-packet deltas.
 - **`test_compact_header.c`** — 25 tests: packet type encode/decode round-trip, size varint boundaries, compact compress/decompress round-trip (passthrough, tANS, delta, multi-packet), ANS state compaction verification, error cases.
 - **Benchmark `--compact-hdr` flag** — enables compact headers in benchmark runs.
+- **Adaptive 10-bit tANS tables** (`NETC_ALG_TANS_10 = 0x06`) — 1024-entry tables for small packets (≤128B) in compact mode. Per-packet competition: encoder tries both 10-bit and 12-bit tables and picks the smaller output. 32 new compact packet types (0xB0-0xCF) for TANS_10 and TANS_10+DELTA variants with bucket encoding. Includes frequency rescaling from 12-bit to 10-bit, dedicated encode/decode, and 37-test suite.
 - Zstd `ZDICT_trainFromBuffer` dependency added to bench (optional, auto-detected)
 
 ### Fixed
 
+- **CRC32 SIMD dispatch polynomial mismatch** — the SSE4.2 `crc32_update` slot used `_mm_crc32_u*` intrinsics which compute CRC32**C** (Castagnoli, 0x1EDC6F41), while the software path and dict checksums use IEEE CRC32 (0xEDB88320). A dict saved on a machine with SSE4.2 active would produce an incompatible checksum. Fixed by having the SSE4.2 slot delegate to the generic IEEE software implementation. ARM NEON (`__crc32d`) already uses IEEE natively and was unaffected.
+- **Duplicate CRC32 lookup table** — `netc_simd_generic.c` maintained its own 256-entry CRC32 table with lazy initialization, identical to the canonical table in `netc_crc32.c`. Removed the duplicate; generic now delegates to `netc_crc32_continue()`.
 - **LZP compact mode BIGRAM mismatch** — LZP compact packet types (0x70-0x8F) cannot encode the BIGRAM flag, but the encoder could produce LZP packets with bigram tables active. The decompressor decoded with unigram tables causing round-trip failures. Fixed by stripping BIGRAM from tANS context flags when LZP is active in compact mode.
 - **LZP compact mode X2 mismatch** — LZP compact packet types cannot encode the X2 (dual-state) flag. For packets ≥ 256B, X2 encoding was selected but silently dropped from the compact header, causing the decompressor to decode with single-state instead of dual-state. Fixed by adding `NETC_INTERNAL_NO_X2` suppression flag. Affected WL-003 (256B), WL-005 (512B), and WL-008 (mixed traffic).
 - **tANS-raw fallback LZP path** — the fallback path (delta residuals too noisy → retry on raw bytes with LZP) did not strip BIGRAM or suppress X2 in compact mode. Same root cause as above, different code path.
@@ -43,9 +46,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - **Compression ratio**: Unchanged (PGO optimizes throughput, not algorithm output).
 
 - Compression ratio improved significantly with compact headers and delta-LZP comparison:
-  - WL-001 (64B): 0.908 -> **0.765** compact / **0.890** legacy
-  - WL-002 (128B): 0.673 -> **0.591** compact / **0.638** legacy
-  - WL-003 (256B): 0.403 -> **0.349** compact / **0.373** legacy
+  - WL-001 (64B): 0.908 -> **0.765** compact / **0.890** legacy (-14.0%)
+  - WL-002 (128B): 0.673 -> **0.591** compact / **0.638** legacy (-7.3%)
+  - WL-003 (256B): 0.403 -> **0.349** compact / **0.373** legacy (-6.3%)
+  - WL-004 (32B): **0.656** compact / **0.906** legacy (-27.6%)
+  - WL-005 (512B): **0.448** compact / **0.460** legacy (-2.6%)
+  - WL-007 (128B): **0.072** compact / **0.115** legacy (-37.2%)
 - WL-003 compact mode (0.349) is now within 0.1% of OodleNetwork baseline (0.35).
 - Legacy (8B header) mode is fully backward-compatible; no behavior changes without `NETC_CFG_FLAG_COMPACT_HDR`.
 

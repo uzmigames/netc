@@ -310,6 +310,45 @@ void test_avx2_freq_matches_generic(void) {
     }
 }
 
+void test_sse42_crc32_matches_generic(void) {
+    /* 3.7 SSE4.2 crc32_update produces identical output to generic
+     * (both must use IEEE CRC32, not CRC32C) */
+    const uint8_t test_vec[] = {'1','2','3','4','5','6','7','8','9'};
+    uint32_t crc_gen  = netc_crc32_update_generic(0, test_vec, 9);
+    uint32_t crc_sse  = netc_crc32_update_sse42(0, test_vec, 9);
+    TEST_ASSERT_EQUAL_HEX32(0xCBF43926U, crc_gen);
+    TEST_ASSERT_EQUAL_HEX32(crc_gen, crc_sse);
+
+    /* Also test with random data */
+    uint32_t crc_gen2 = netc_crc32_update_generic(0, s_curr, PKT_SIZE);
+    uint32_t crc_sse2 = netc_crc32_update_sse42(0, s_curr, PKT_SIZE);
+    TEST_ASSERT_EQUAL_HEX32(crc_gen2, crc_sse2);
+}
+
+void test_dict_crc32_roundtrip(void) {
+    /* 3.8 Dictionary train → save → load round-trip with CRC32 validation.
+     * Verifies that the CRC32 computed at save time matches at load time,
+     * regardless of which SIMD path is active. */
+    TEST_ASSERT_NOT_NULL(s_dict);
+
+    /* Save the dict to a blob */
+    void  *blob = NULL;
+    size_t blob_size = 0;
+    netc_result_t r = netc_dict_save(s_dict, &blob, &blob_size);
+    TEST_ASSERT_EQUAL_INT(NETC_OK, r);
+    TEST_ASSERT_NOT_NULL(blob);
+    TEST_ASSERT_GREATER_THAN(0U, blob_size);
+
+    /* Load it back — this validates the CRC32 checksum internally */
+    netc_dict_t *loaded = NULL;
+    r = netc_dict_load(blob, blob_size, &loaded);
+    TEST_ASSERT_EQUAL_INT(NETC_OK, r);
+    TEST_ASSERT_NOT_NULL(loaded);
+
+    netc_dict_free(loaded);
+    netc_dict_free_blob(blob);
+}
+
 /* =========================================================================
  * 4. Unaligned buffer safety
  * ========================================================================= */
@@ -597,6 +636,10 @@ int main(void) {
     RUN_TEST(test_avx2_delta_matches_generic);
     RUN_TEST(test_sse42_freq_matches_generic);
     RUN_TEST(test_avx2_freq_matches_generic);
+
+    /* 3b. CRC32 cross-path consistency */
+    RUN_TEST(test_sse42_crc32_matches_generic);
+    RUN_TEST(test_dict_crc32_roundtrip);
 
     /* 4. Unaligned buffers */
     RUN_TEST(test_sse42_unaligned_encode);

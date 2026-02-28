@@ -8,14 +8,11 @@
  *     _mm_xor_si128 — 16 bytes of XOR per cycle
  *     _mm_add_epi8  — 16 bytes of wrapping byte addition per cycle
  *
- * Note: The CRC32C variant computed by SSE4.2 differs from the ISO-HDLC CRC32
- * used in the generic path. For the netc CRC32 used in dict save/load,
- * consistency matters more than the specific polynomial. We use the hardware
- * CRC32C (Castagnoli, 0x1EDC6F41 reflected = 0x82F63B78) via _mm_crc32_u*
- * and expose it via the dispatch table. The generic path uses ISO-HDLC.
- * Since the CRC is only used for dict file integrity, not wire format, mixing
- * is safe as long as the same path is used for save and load — which is
- * guaranteed because both use the context's dispatch table.
+ * Note: SSE4.2 _mm_crc32_u* computes CRC32C (Castagnoli), NOT IEEE CRC32.
+ * Since the dict checksum format uses IEEE CRC32 and dicts must be portable
+ * across machines with different SIMD levels, the CRC32 dispatch slot delegates
+ * to the generic (software) IEEE implementation. Future PCLMULQDQ-based IEEE
+ * CRC32 acceleration can replace this when added.
  *
  * Delta encoding: SSE4.2 does NOT change the field-class boundaries.
  * We process 16 bytes at a time in two phases:
@@ -217,40 +214,20 @@ void netc_freq_count_sse42(const uint8_t *data, size_t len, uint32_t *freq)
 }
 
 /* =========================================================================
- * SSE4.2 hardware CRC32C
+ * CRC32 (IEEE 802.3) — delegate to generic software implementation.
  *
- * Uses the CRC32C (Castagnoli) polynomial via _mm_crc32_u* intrinsics.
- * Processes 8 bytes at a time on x64, falling back to 1-byte at tail.
+ * SSE4.2 _mm_crc32_u* computes CRC32C (Castagnoli, 0x1EDC6F41), which is a
+ * DIFFERENT polynomial from the IEEE CRC32 (0xEDB88320) used by the dict
+ * checksum format. To ensure all SIMD paths produce identical checksums
+ * (portable dict files), we delegate to the canonical IEEE implementation.
+ *
+ * Future: PCLMULQDQ (CLMUL) can accelerate IEEE CRC32 on x86; when added,
+ * it would replace this delegation.
  * ========================================================================= */
 
 uint32_t netc_crc32_update_sse42(uint32_t crc, const uint8_t *data, size_t len)
 {
-    size_t i = 0;
-
-#if defined(_M_X64) || defined(__x86_64__)
-    /* Process 8 bytes at a time */
-    uint64_t crc64 = (uint64_t)(uint32_t)crc;
-    for (; i + 8u <= len; i += 8u) {
-        uint64_t v;
-        memcpy(&v, data + i, 8);
-        crc64 = _mm_crc32_u64(crc64, v);
-    }
-    crc = (uint32_t)crc64;
-#endif
-
-    /* 4-byte chunks */
-    for (; i + 4u <= len; i += 4u) {
-        uint32_t v;
-        memcpy(&v, data + i, 4);
-        crc = _mm_crc32_u32(crc, v);
-    }
-
-    /* Byte tail */
-    for (; i < len; i++) {
-        crc = _mm_crc32_u8(crc, data[i]);
-    }
-
-    return crc;
+    return netc_crc32_update_generic(crc, data, len);
 }
 
 #else /* SSE4.2 not available at compile time — stubs that should never be called */

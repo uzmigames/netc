@@ -23,7 +23,8 @@
 #define NETC_DEFAULT_RING_SIZE  (64u * 1024u)  /* 64 KB */
 #define NETC_DEFAULT_ARENA_SIZE (NETC_MAX_PACKET_SIZE * 2u + 64u)  /* ~131 KB */
 #define NETC_DICT_MAGIC         0x4E455443U    /* "NETC" */
-#define NETC_DICT_VERSION       4U             /* v0.4: LZP hash-prediction table */
+#define NETC_DICT_VERSION       5U             /* v0.5: 8-class trained bigram quantization */
+#define NETC_DICT_VERSION_V4    4U             /* v0.4: LZP hash-prediction table (backward compat) */
 
 /* =========================================================================
  * Dictionary internals
@@ -38,7 +39,7 @@
  */
 struct netc_dict {
     uint32_t magic;      /* NETC_DICT_MAGIC — sanity check */
-    uint8_t  version;    /* NETC_DICT_VERSION (= 4) */
+    uint8_t  version;    /* NETC_DICT_VERSION (= 5) */
     uint8_t  model_id;   /* 1–254; 0 = passthrough only; 255 = reserved */
     uint8_t  ctx_count;  /* Number of context buckets stored (= NETC_CTX_COUNT) */
     uint8_t  dict_flags; /* NETC_DICT_FLAG_* bitmask (was _pad in v3) */
@@ -46,11 +47,20 @@ struct netc_dict {
     /* Per-context-bucket tANS tables — 16 tables in v0.2+ */
     netc_tans_table_t tables[NETC_CTX_COUNT];
 
-    /* Per-bucket bigram sub-tables (v0.3+, NETC_BIGRAM_CTX_COUNT classes per bucket).
+    /* Per-bucket bigram sub-tables (v0.3+).
      * bigram_tables[bucket][class] is the tANS table used when the previous byte
-     * maps to bigram class `class` (via netc_bigram_class(prev_byte)).
+     * maps to bigram class `class` (via netc_bigram_class(prev_byte, class_map)).
+     * v4 dicts: 4 classes per bucket (static prev>>6).
+     * v5 dicts: 8 classes per bucket (trained class_map).
      * Only populated when trained with NETC_CFG_FLAG_BIGRAM. */
     netc_tans_table_t bigram_tables[NETC_CTX_COUNT][NETC_BIGRAM_CTX_COUNT];
+
+    /* Trained bigram class map (v0.5+): maps each byte value (0-255) to class 0-7.
+     * For v4 dicts loaded into v5 code, this is built from prev_byte >> 6. */
+    uint8_t  bigram_class_map[256];
+
+    /* Number of bigram classes actually in use: 4 for v4 dicts, 8 for v5 dicts. */
+    uint8_t  bigram_class_count;
 
     /* LZP hash table (v0.4+, optional).
      * Maps 3-byte context hashes to predicted next bytes.
@@ -396,7 +406,43 @@ static const netc_pkt_type_entry_t netc_pkt_type_table[256] = {
     [0xAE] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (14u<<4) },
     [0xAF] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (15u<<4) },
 
-    /* 0xB0-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
+    /* 0xB0-0xBF: TANS_10BIT + bucket 0-15 (10-bit tANS, small-packet optimization) */
+    [0xB0] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (0u<<4) },
+    [0xB1] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (1u<<4) },
+    [0xB2] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (2u<<4) },
+    [0xB3] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (3u<<4) },
+    [0xB4] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (4u<<4) },
+    [0xB5] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (5u<<4) },
+    [0xB6] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (6u<<4) },
+    [0xB7] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (7u<<4) },
+    [0xB8] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (8u<<4) },
+    [0xB9] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (9u<<4) },
+    [0xBA] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (10u<<4) },
+    [0xBB] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (11u<<4) },
+    [0xBC] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (12u<<4) },
+    [0xBD] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (13u<<4) },
+    [0xBE] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (14u<<4) },
+    [0xBF] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (15u<<4) },
+
+    /* 0xC0-0xCF: TANS_10BIT + DELTA + bucket 0-15 */
+    [0xC0] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (0u<<4) },
+    [0xC1] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (1u<<4) },
+    [0xC2] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (2u<<4) },
+    [0xC3] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (3u<<4) },
+    [0xC4] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (4u<<4) },
+    [0xC5] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (5u<<4) },
+    [0xC6] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (6u<<4) },
+    [0xC7] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (7u<<4) },
+    [0xC8] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (8u<<4) },
+    [0xC9] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (9u<<4) },
+    [0xCA] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (10u<<4) },
+    [0xCB] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (11u<<4) },
+    [0xCC] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (12u<<4) },
+    [0xCD] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (13u<<4) },
+    [0xCE] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (14u<<4) },
+    [0xCF] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (15u<<4) },
+
+    /* 0xD0-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
     /* 0xFF: legacy sentinel */
     [0xFF] = { 0xFF, 0xFF },
 };
@@ -453,6 +499,12 @@ static NETC_INLINE uint8_t netc_compact_type_encode(uint8_t flags, uint8_t algor
         else if (bigram)          base = 0x90u;
         else if (delta)           base = 0x80u;
         else                      base = 0x70u;
+        return (uint8_t)(base + bucket);
+    }
+
+    /* 10-bit tANS with bucket (no bigram/x2 variants — small packets only) */
+    if (alg_lo == NETC_ALG_TANS_10) {
+        uint8_t base = delta ? 0xC0u : 0xB0u;
         return (uint8_t)(base + bucket);
     }
 

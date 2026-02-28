@@ -11,14 +11,14 @@
 
 ## Key Features
 
-- **tANS (FSE) entropy coder** — 12-bit table (4096 entries), branch-free decode, fractional-bit precision
+- **tANS (FSE) entropy coder** — adaptive 12-bit (4096 entries) and 10-bit (1024 entries) tables, branch-free decode, fractional-bit precision
 - **LZP prediction pre-filter** — position-aware order-1 context XOR filter, predicted bytes become 0x00
 - **Bigram context model** — order-1 frequency tables per context bucket
 - **Inter-packet delta prediction** — field-class aware (XOR for flags/floats, subtraction for counters)
 - **Compact packet header** — 2B header for packets ≤ 127B, 4B for larger. Opt-in via `NETC_CFG_FLAG_COMPACT_HDR`
 - **ANS state compaction** — 2B tANS state in compact mode (vs. 4B legacy)
 - **Multi-codec competition** — tANS vs LZ77 vs RLE vs passthrough per packet, smallest wins
-- **Dictionary training** — train from packet corpus, freeze for hot-path. v4 format with LZP + bigram tables
+- **Dictionary training** — train from packet corpus, freeze for hot-path. v5 format with LZP + 8-class trained bigram tables
 - **Stateful & stateless modes** — ring buffer history (TCP) or self-contained per-packet (UDP)
 - **SIMD acceleration** — SSE4.2 and AVX2 (x86) with runtime dispatch, generic scalar fallback
 - **Zero dynamic allocation in hot path** — pre-allocated arena, deterministic latency
@@ -35,17 +35,18 @@
 Measured on Windows x86_64, MSVC `/O2`, 50,000 iterations, 10,000 training packets.
 Lower is better (compressed size / original size).
 
-| Compressor | WL-001 (64B) | WL-002 (128B) | WL-003 (256B) | Design goal |
-|------------|:------------:|:-------------:|:-------------:|-------------|
-| **netc** (compact header) | **0.765** | **0.591** | **0.349** | Network packets |
-| **netc** (legacy 8B header) | 0.890 | 0.638 | 0.373 | Network packets |
-| OodleNetwork 2.9.13 | 0.68 | 0.52 | 0.35 | Network packets |
-| Zstd (level=1, dict) | ~0.85 | ~0.44 | ~0.30 | General purpose |
-| zlib (level=1) | ~0.95 | ~0.52 | ~0.38 | General purpose |
-| LZ4 (fast) | ~1.00+ | ~0.71 | ~0.55 | Speed-oriented |
-| Snappy | ~1.00+ | ~0.78 | ~0.60 | Speed-oriented |
+| Compressor | WL-004 (32B) | WL-001 (64B) | WL-002 (128B) | WL-003 (256B) | WL-005 (512B) | Design goal |
+|------------|:------------:|:------------:|:-------------:|:-------------:|:-------------:|-------------|
+| **netc** (compact header) | **0.656** | **0.765** | **0.591** | **0.349** | **0.448** | Network packets |
+| **netc** (legacy 8B header) | 0.906 | 0.890 | 0.638 | 0.373 | — | Network packets |
+| OodleNetwork UDP 2.9.13 | 0.612 | 0.719 | 0.544 | 0.327 | 0.489 | Network packets |
+| OodleNetwork TCP 2.9.13 | 0.524 | 0.732 | 0.555 | 0.336 | 0.415 | Network packets |
+| Zstd (level=1, dict) | 1.321 | 1.034 | 0.746 | 0.430 | 0.574 | General purpose |
+| zlib (level=1) | 1.176 | 0.966 | 0.740 | 0.441 | 0.591 | General purpose |
+| LZ4 (fast) | 1.056 | 0.875 | 0.744 | 0.478 | 0.703 | Speed-oriented |
+| Snappy | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | Speed-oriented |
 
-> **Note:** General-purpose compressors (Zstd, zlib) can beat netc on ratio for larger payloads (≥ 128B) because they have no per-packet header overhead and use more aggressive algorithms. netc's advantage is on small packets (32-128B) typical of game netcode, where per-packet overhead dominates and general-purpose compressors struggle. LZ4/Snappy often fail to compress small packets at all (ratio ≥ 1.0).
+> **Note:** General-purpose compressors (Zstd, zlib, LZ4, Snappy) all **expand** 32B packets (ratio > 1.0) — their framing overhead exceeds savings. netc and OodleNetwork are purpose-built for small network packets. netc beats Oodle UDP on 512B telemetry (0.448 vs 0.489) and stays within 6-9% on 32-128B game packets. The remaining gap is primarily in dictionary quality and prediction efficiency on small payloads.
 
 ### netc Header Overhead Breakdown
 
@@ -71,15 +72,17 @@ Performance targets for v1.0 on server-grade hardware (not yet measured on targe
 
 See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for methodology and workload definitions.
 
-### Gap to OodleNetwork
+### Gap to OodleNetwork UDP
 
-| Workload | netc (compact) | Oodle 2.9.13 | Gap (bytes) | Gap (ratio) |
-|----------|:--------------:|:------------:|:-----------:|:-----------:|
-| WL-001 64B | 0.765 | 0.68 | ~5.4B | 0.085 |
-| WL-002 128B | 0.591 | 0.52 | ~9.1B | 0.071 |
-| WL-003 256B | 0.349 | 0.35 | **-0.3B** | **-0.001** |
+| Workload | netc (compact) | Oodle UDP | Gap | Notes |
+|----------|:--------------:|:---------:|:---:|-------|
+| WL-004 32B | 0.656 | 0.612 | 7.2% | Oodle dict quality advantage on tiny packets |
+| WL-001 64B | 0.765 | 0.719 | 6.4% | Close — netc within ~3B per packet |
+| WL-002 128B | 0.591 | 0.544 | 8.6% | Largest gap — Oodle prediction excels here |
+| WL-003 256B | 0.349 | 0.327 | 6.9% | Both excellent — netc within ~6B per packet |
+| WL-005 512B | **0.448** | 0.489 | **-8.4%** | **netc wins** — tANS + LZP outperforms Oodle on larger payloads |
 
-WL-003 compact mode (0.349) now matches OodleNetwork (0.35). Remaining gap on small packets is dominated by per-packet header overhead (netc 4B min vs. Oodle 0B out-of-band). Closing the gap further is the primary focus for v1.0.
+netc beats OodleNetwork UDP on 512B payloads and stays within 6-9% on 32-256B game packets. The gap is primarily in dictionary prediction quality on small packets (32-128B). Throughput optimization is the focus for v1.0 — see `optimize-compress-throughput` task.
 
 ---
 
@@ -202,7 +205,8 @@ Packet Input (8-65535 bytes)
     |  Delta-vs-LZP comparison: picks smaller of delta+tANS vs LZP+tANS
     v
 [Stage 3] tANS Entropy Coding
-    |  12-bit table (4096 entries), branch-free decode
+    |  Adaptive 12-bit (4096) or 10-bit (1024) tables, branch-free decode
+    |  10-bit tables for ≤128B packets (lower per-symbol overhead)
     |  4 context buckets: HEADER/SUBHEADER/BODY/TAIL
     |  Per-position or bigram context variants
     v
@@ -280,10 +284,10 @@ netc/
 
 | Feature | Status |
 |---------|--------|
-| tANS entropy coder | Done |
+| tANS entropy coder (12-bit + 10-bit adaptive) | Done |
 | Delta prediction | Done |
 | LZP XOR pre-filter | Done |
-| Bigram context model | Done |
+| Bigram context model (8-class trained) | Done |
 | Compact packet header | Done |
 | SIMD (SSE4.2, AVX2) | Done |
 | Security hardening + fuzz | Done |

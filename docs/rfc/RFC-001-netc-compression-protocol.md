@@ -309,30 +309,32 @@ A training corpus MUST contain:
 6. Validate: compress/decompress all corpus packets, verify round-trip
 ```
 
-### 7.3 Dictionary Format (v4)
+### 7.3 Dictionary Format (v5)
 
 The dictionary blob is a serialized binary format with CRC32 integrity:
 
 ```
-[0..7]        Header: magic (4B 'NETC'), version (1B=4), model_id (1B),
+[0..7]        Header: magic (4B 'NETC'), version (1B=5), model_id (1B),
               ctx_count (1B), flags (1B: bit 0 = DICT_FLAG_LZP)
-[8..8199]     Unigram frequency tables: 16 buckets × 256 × uint16 LE
-[8200..40967] Bigram frequency tables: 16 × 4 × 256 × uint16 LE
+[8..263]      Bigram class map: 256 × uint8 (prev_byte → class 0-7)
+[264..8455]   Unigram frequency tables: 16 buckets × 256 × uint16 LE
+[8456..73991] Bigram frequency tables: 16 × 8 × 256 × uint16 LE
 [if LZP flag set]:
-  [40968..40971]               lzp_table_size (uint32 LE)
-  [40972..40972+size*2-1]      LZP entries: [value:u8, valid:u8] × size
+  [73992..73995]               lzp_table_size (uint32 LE)
+  [73996..73996+size*2-1]      LZP entries: [value:u8, valid:u8] × size
 [last 4]      CRC32 checksum of all preceding data
 ```
 
 **Version history**:
-- v3: Unigram + bigram tables, no LZP
+- v3: Unigram + bigram tables (4 static classes), no LZP
 - v4: Adds optional LZP hash table (131072 entries x 2 bytes = 256 KB)
+- v5: Adds trained bigram class map (256B), expands bigram tables to 8 classes (65536B)
 
-v3 dictionaries load successfully in v4-capable code (LZP table = NULL, XOR filter skipped).
+v4 dictionaries load successfully in v5-capable code (class_map defaults to `prev >> 6`, 4-class tables zero-extended to 8 classes). v3 dicts load without LZP or class map.
 
 ### 7.4 Dictionary Constraints
 
-- Maximum dictionary size: ~300 KB (v4 with LZP)
+- Maximum dictionary size: ~336 KB (v5 with LZP)
 - Minimum dictionary size: ~8 KB (unigram tables only)
 - Dictionary is immutable after training (read-only during compression)
 - Multiple dictionaries can be active simultaneously (per-connection)
