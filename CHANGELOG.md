@@ -9,7 +9,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- **Compact packet header** (`NETC_CFG_FLAG_COMPACT_HDR`) — variable-length wire format: 2 bytes for packets <= 127B, 4 bytes for 128-65535B. Opt-in per-context flag; legacy 8B header remains the default. Eliminates `compressed_size`, `model_id`, and `context_seq` from the wire (derived from context state).
+- **ANS state compaction** — when compact header is active, tANS initial state is encoded as `uint16` (2B) instead of `uint32` (4B). ANS state range [4096, 8192) fits in 13 bits. Saves 2B per packet on single-region tANS, 4B on dual-interleaved (X2) tANS.
+- **Packet type byte encoding** — single-byte structured encoding of `(flags, algorithm)` pairs replaces 2 separate header fields. 144 valid entries covering all tANS, LZP, PCTX, MREG, passthrough, and bucketed algorithm variants. Decode via const lookup table.
+- **LZP (Lempel-Ziv Prediction) XOR pre-filter** — position-aware order-1 context prediction. XOR each byte with its LZP prediction before tANS encoding; correctly predicted bytes become `0x00`, concentrating the distribution. Integrated into dict training (Boyer-Moore majority vote) and serialization (dict format v4).
+- **Bigram context model** (`NETC_CFG_FLAG_BIGRAM`) — order-1 bigram frequency tables trained per context bucket. 4 bigram tables (16 x 4 x 256 x uint16) added to dictionary.
+- **Dictionary format v4** — extends v3 with LZP hash table (131072 entries x 2 bytes = 256 KB) and dict_flags field. Backward-compatible: v3 dicts load without LZP.
+- **`test_compact_header.c`** — 25 tests: packet type encode/decode round-trip, size varint boundaries, compact compress/decompress round-trip (passthrough, tANS, delta, multi-packet), ANS state compaction verification, error cases.
+- **Benchmark `--compact-hdr` flag** — enables compact headers in benchmark runs.
 - Zstd `ZDICT_trainFromBuffer` dependency added to bench (optional, auto-detected)
+
+### Changed
+
+- Compression ratio improved significantly with compact headers enabled:
+  - WL-001 (64B): 0.908 -> **0.783** (13.8% improvement)
+  - WL-002 (128B): 0.673 -> **0.626** (7.0% improvement)
+  - WL-003 (256B): 0.403 -> **0.381** (5.5% improvement)
+- Legacy (8B header) mode is fully backward-compatible; no behavior changes without `NETC_CFG_FLAG_COMPACT_HDR`.
 
 ---
 

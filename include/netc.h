@@ -45,8 +45,12 @@ extern "C" {
  */
 #define NETC_MAX_OVERHEAD     8U
 
-/** Compressed packet header size in bytes (RFC-001 §9.1). */
+/** Compressed packet header size in bytes (RFC-001 §9.1, legacy format). */
 #define NETC_HEADER_SIZE      8U
+
+/** Compact header size: 2 bytes when original_size <= 127, 4 bytes otherwise. */
+#define NETC_COMPACT_HDR_MIN  2U
+#define NETC_COMPACT_HDR_MAX  4U
 
 /* =========================================================================
  * Return codes (netc_result_t)
@@ -116,6 +120,31 @@ typedef enum netc_result {
 /** rANS — secondary codec, deferred to v0.2. */
 #define NETC_ALG_RANS     0x02U
 
+/** Cross-packet LZ77 with ring-buffer history (v0.3+).
+ *  Requires stateful mode. Token stream (NETC_ALG_LZ77X payload):
+ *    [0lllllll]                  literal run: bits[6:0]+1 raw bytes (1–128)
+ *    [10llllll][oooooooo]        short back-ref: len=bits[5:0]+3, offset=byte+1 (within-packet, 1–256)
+ *    [11llllll][oo oooooo oooooooo] long back-ref: len=bits[5:0]+3, offset=u16le+1 (ring+dst, 1–65536)
+ *  Encoder appends decoded bytes to ring buffer after each packet.
+ *  Decoder reads from ring[ring_pos - offset .. ring_pos - 1] for long refs. */
+#define NETC_ALG_LZ77X    0x03U
+
+/** Per-position context-adaptive tANS (PCTX, v0.4+).
+ *  Encodes all bytes in a SINGLE ANS stream but switches the probability
+ *  table per byte offset: table = dict->tables[netc_ctx_bucket(offset)].
+ *  This gives per-position entropy specialization (like MREG) with ZERO
+ *  descriptor overhead — wire format is just [4B initial_state][bitstream].
+ *  Preferred over MREG for packets < 512B where MREG descriptor overhead
+ *  exceeds the benefit of separate per-region streams. */
+#define NETC_ALG_TANS_PCTX 0x04U
+
+/** LZP (Lempel-Ziv Prediction) — hash-context byte prediction (v0.5+).
+ *  Predicts each byte by hashing the 3 previous bytes and looking up a
+ *  trained hash table.  Matches cost ~1 bit; misses cost ~9 bits.
+ *  Wire format: [2B n_literals LE][flag_bits][literal_bytes].
+ *  Requires a v4+ dictionary with an LZP table trained via netc_dict_train(). */
+#define NETC_ALG_LZP      0x05U
+
 /** Uncompressed passthrough (incompressible data, AD-006). */
 #define NETC_ALG_PASSTHRU 0xFFU
 
@@ -146,6 +175,12 @@ typedef enum netc_result {
 
 /** Collect compression statistics (accessible via netc_ctx_stats). */
 #define NETC_CFG_FLAG_STATS     0x10U
+
+/** Use compact packet headers (2-4 bytes instead of 8).
+ *  Eliminates compressed_size, model_id, and context_seq from the wire —
+ *  they are derived from src_size and the context state.
+ *  Both compressor and decompressor contexts MUST agree on this flag. */
+#define NETC_CFG_FLAG_COMPACT_HDR 0x20U
 
 /* =========================================================================
  * Opaque types

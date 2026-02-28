@@ -402,3 +402,99 @@ int netc_tans_decode(
 
     return 0;
 }
+
+/* =========================================================================
+ * netc_tans_encode_pctx
+ *
+ * Per-position context-adaptive ANS encoder.  Processes bytes in reverse
+ * order (standard ANS), switching the probability table per byte offset:
+ *   tbl = tables[netc_ctx_bucket(i)]
+ *
+ * This gives per-position entropy specialization (like MREG multi-region)
+ * with ZERO descriptor overhead — wire format is [4B state][bitstream].
+ *
+ * Returns final state (initial state for decoder), or 0 on error.
+ * ========================================================================= */
+
+uint32_t netc_tans_encode_pctx(
+    const netc_tans_table_t *tables,
+    const uint8_t           *src,
+    size_t                   src_size,
+    netc_bsw_t              *bsw,
+    uint32_t                 initial_state)
+{
+    if (!tables || !src || !bsw || src_size == 0) return 0;
+
+    uint32_t X = initial_state;
+    if (X < NETC_TANS_TABLE_SIZE) X = NETC_TANS_TABLE_SIZE;
+
+    for (size_t i = src_size; i-- > 0; ) {
+        uint32_t bucket = netc_ctx_bucket((uint32_t)i);
+        const netc_tans_table_t *tbl = &tables[bucket];
+        if (!tbl->valid) return 0;
+
+        uint8_t sym = src[i];
+        const netc_tans_encode_entry_t *e = &tbl->encode[sym];
+        uint32_t f     = e->freq;
+        uint32_t lower = e->lower;
+        int      nb_hi = (int)e->nb_hi;
+
+        if (f == 0) return 0; /* symbol not in this table */
+
+        int      nb = (nb_hi == 0 || X >= lower) ? nb_hi : nb_hi - 1;
+        uint32_t j  = (X >> (uint32_t)nb) - f;
+
+        if (nb > 0) {
+            if (netc_bsw_write(bsw, X & ((1U << (uint32_t)nb) - 1U), nb) != 0)
+                return 0;
+        }
+
+        X = (uint32_t)tbl->encode_state[(uint32_t)e->cumul + j];
+    }
+
+    return X;
+}
+
+/* =========================================================================
+ * netc_tans_decode_pctx
+ *
+ * Per-position context-adaptive ANS decoder.  Decodes bytes in forward
+ * order, switching the decode table per byte offset:
+ *   tbl = tables[netc_ctx_bucket(i)]
+ *
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_pctx(
+    const netc_tans_table_t *tables,
+    netc_bsr_t              *bsr,
+    uint8_t                 *dst,
+    size_t                   dst_size,
+    uint32_t                 initial_state)
+{
+    if (!tables || !bsr || !dst || dst_size == 0) return -1;
+
+    uint32_t X = initial_state;
+    if (X < NETC_TANS_TABLE_SIZE || X >= 2U * NETC_TANS_TABLE_SIZE) return -1;
+
+    for (size_t i = 0; i < dst_size; i++) {
+        uint32_t bucket = netc_ctx_bucket((uint32_t)i);
+        const netc_tans_table_t *tbl = &tables[bucket];
+        if (!tbl->valid) return -1;
+
+        uint32_t slot = X - NETC_TANS_TABLE_SIZE;
+        const netc_tans_decode_entry_t *d = &tbl->decode[slot];
+
+        dst[i] = d->symbol;
+
+        int      nb       = d->nb_bits;
+        uint32_t bits_val = 0;
+        if (nb > 0) {
+            if (netc_bsr_read(bsr, nb, &bits_val) != 0) return -1;
+        }
+
+        X = (uint32_t)d->next_state_base + bits_val;
+    }
+
+    return 0;
+}

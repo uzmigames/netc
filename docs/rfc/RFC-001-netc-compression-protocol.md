@@ -180,7 +180,7 @@ netc is optimized for packets with these properties:
 
 ### 5.2 Algorithm Selection
 
-NETC-LowE uses a two-stage pipeline:
+NETC-LowE uses a multi-stage pipeline:
 
 ```
 Input packet
@@ -189,20 +189,30 @@ Input packet
 [Stage 1: Delta Prediction — field-class aware]
     │ Integer counters: byte subtraction from previous packet (wrapping)
     │ Float components / flags: XOR with previous packet byte
-    │ Fixed strings / constants: passthrough (high entropy or near-zero)
     │ Field class inferred from training corpus (statistical, not schema-based)
+    │ Skipped for first packet or when delta is disabled
     ▼
-[Stage 2: Entropy Coding — tANS (FSE)]
+[Stage 2: LZP XOR Pre-Filter — position-aware prediction]
+    │ hash(previous_byte, byte_position) → predicted byte
+    │ XOR each byte with prediction: correct predictions → 0x00
+    │ Applied when dict has LZP table and delta was NOT applied
+    │ tANS tables retrained on LZP-filtered data during training
+    ▼
+[Stage 3: Entropy Coding — tANS (FSE)]
     │ Single tANS codec for all packet sizes
     │ 12-bit table (4096 entries × 4 bytes = 16 KB, fits in L1 cache)
     │ Branch-free decode: one table lookup + one state transition per symbol
-    │ No division in decode loop
+    │ Multi-region bucket selection or per-position context (PCTX)
+    │ Optional bigram (order-1) context model
     ▼
-Compressed bitstream
-    │ (passthrough if compressed_size ≥ original_size — see AD-006)
+[Stage 4: Competition]
+    │ tANS vs LZ77 vs RLE vs passthrough — smallest output wins
+    │ Passthrough if compressed_size ≥ original_size (see AD-006)
+    ▼
+Compressed bitstream (compact or legacy header + payload)
 ```
 
-**Note on rANS**: rANS is available as an opt-in secondary path for v0.2+. It will be promoted only if the benchmark harness (RFC-002, WL-003/WL-005) shows measurable throughput gains. See AD-001 in `docs/design/algorithm-decisions.md`.
+**Note on rANS**: rANS is available as an opt-in secondary path for v0.2+. See AD-001 in `docs/design/algorithm-decisions.md`.
 
 ### 5.3 Why tANS over Huffman / rANS
 
@@ -299,27 +309,34 @@ A training corpus MUST contain:
 6. Validate: compress/decompress all corpus packets, verify round-trip
 ```
 
-### 7.3 Dictionary Format
+### 7.3 Dictionary Format (v4)
 
-```c
-typedef struct {
-    uint32_t magic;           // 0x4E455443 ('NETC')
-    uint16_t version;         // Dictionary format version
-    uint16_t flags;           // NETC_DICT_FLAG_*
-    uint32_t corpus_size;     // Number of training packets
-    uint32_t dict_size;       // Size of this struct in bytes
-    uint8_t  freq[256];       // Normalized byte frequencies (ANS)
-    uint16_t bigram[256][256]; // Position-context bigram model (optional)
-    uint32_t checksum;        // CRC32 of preceding data
-} netc_dict_t;
+The dictionary blob is a serialized binary format with CRC32 integrity:
+
 ```
+[0..7]        Header: magic (4B 'NETC'), version (1B=4), model_id (1B),
+              ctx_count (1B), flags (1B: bit 0 = DICT_FLAG_LZP)
+[8..8199]     Unigram frequency tables: 16 buckets × 256 × uint16 LE
+[8200..40967] Bigram frequency tables: 16 × 4 × 256 × uint16 LE
+[if LZP flag set]:
+  [40968..40971]               lzp_table_size (uint32 LE)
+  [40972..40972+size*2-1]      LZP entries: [value:u8, valid:u8] × size
+[last 4]      CRC32 checksum of all preceding data
+```
+
+**Version history**:
+- v3: Unigram + bigram tables, no LZP
+- v4: Adds optional LZP hash table (131072 entries x 2 bytes = 256 KB)
+
+v3 dictionaries load successfully in v4-capable code (LZP table = NULL, XOR filter skipped).
 
 ### 7.4 Dictionary Constraints
 
-- Maximum dictionary size: 512 KB
-- Minimum dictionary size: 1 KB (byte frequency table only)
+- Maximum dictionary size: ~300 KB (v4 with LZP)
+- Minimum dictionary size: ~8 KB (unigram tables only)
 - Dictionary is immutable after training (read-only during compression)
 - Multiple dictionaries can be active simultaneously (per-connection)
+- LZP training uses Boyer-Moore majority vote with verification pass (40% confidence threshold)
 
 ---
 
@@ -369,7 +386,9 @@ If compressed size ≥ original size, netc emits the original uncompressed paylo
 
 ## 9. Packet Format
 
-### 9.1 Compressed Packet Layout
+### 9.1 Legacy Packet Layout (8 bytes)
+
+The default wire format uses a fixed 8-byte header:
 
 ```
 Offset  Size  Field
@@ -384,6 +403,41 @@ Offset  Size  Field
 ```
 
 **Total header size**: 8 bytes. `NETC_MAX_OVERHEAD` = 8.
+
+### 9.1a Compact Packet Layout (2-4 bytes)
+
+When `NETC_CFG_FLAG_COMPACT_HDR` is set on both compressor and decompressor contexts, a variable-length compact header is used instead. This eliminates redundant fields that can be derived from context state:
+
+| Eliminated field | Recovery method |
+|------------------|----------------|
+| `compressed_size` | `= src_size - header_size` (caller provides `src_size`) |
+| `model_id` | From `ctx->dict->model_id` (stateful) or caller's dict (stateless) |
+| `context_seq` | Tracked internally by both compressor and decompressor |
+
+```
+Compact Header:
+
+Byte 0: PACKET_TYPE (uint8)
+  Structured encoding of (flags, algorithm) as a single lookup index.
+  0x00-0x0F: Non-bucketed types (passthru, PCTX, MREG, LZ77X, etc.)
+  0x10-0x8F: Bucketed types (TANS+bucket, LZP+bucket, with delta/bigram/x2 variants)
+  0xFF: Reserved (invalid)
+
+Byte 1: [E][SSSSSSS]
+  E=0: original_size = SSSSSSS (0-127). Total header = 2 bytes.
+  E=1: bytes 2-3 contain original_size as uint16 LE. Total header = 4 bytes.
+
+Bytes 2-3 (only when E=1): original_size (uint16 LE, range 128-65535)
+```
+
+**Result**: 2-byte header for packets <= 127B, 4-byte for 128-65535B.
+
+**ANS state compaction**: In compact mode, the tANS initial state is encoded as `uint16` (2 bytes) instead of `uint32` (4 bytes). The ANS state range [4096, 8192) requires only 13 bits, fitting in a `uint16`. This saves an additional 2 bytes per packet for single-region tANS, and 4 bytes for dual-interleaved (X2) tANS.
+
+**Impact on overhead**:
+- Legacy: 8B header + 4B ANS state = 12B minimum overhead
+- Compact (packet <= 127B): 2B header + 2B ANS state = 4B minimum overhead
+- Compact (packet >= 128B): 4B header + 2B ANS state = 6B minimum overhead
 
 ### 9.2 model_id — Dictionary and Model Versioning
 
@@ -405,20 +459,42 @@ Server upgrade sequence:
 ### 9.3 Algorithm Values
 
 ```c
-#define NETC_ALG_TANS     0x01  // tANS (FSE) — primary codec, v0.1+
-#define NETC_ALG_RANS     0x02  // rANS — secondary codec, v0.2+ (opt-in)
-#define NETC_ALG_PASSTHRU 0xFF  // Uncompressed passthrough (no compression applied)
+#define NETC_ALG_TANS      0x01  // tANS (FSE) — primary codec, v0.1+
+#define NETC_ALG_RANS      0x02  // rANS — planned for v0.2 (opt-in)
+#define NETC_ALG_TANS_PCTX 0x03  // Per-position context-adaptive tANS
+#define NETC_ALG_LZP       0x04  // LZP XOR pre-filter + tANS
+#define NETC_ALG_LZ77X     0x05  // Cross-packet LZ77 (ring buffer)
+#define NETC_ALG_PASSTHRU  0xFF  // Uncompressed passthrough
 ```
+
+The upper 4 bits of the `algorithm` byte encode the table bucket index (0-15) for single-region tANS. For example, `NETC_ALG_TANS | (bucket << 4)` selects tANS with a specific frequency table bucket.
 
 The `algorithm` field allows decoders to support multiple algorithm variants without a breaking wire format change.
 
 ### 9.4 Flags
 
+#### Packet header flags (`NETC_PKT_FLAG_*`)
+
 ```c
 #define NETC_PKT_FLAG_DELTA      0x01  // Delta-encoded from previous packet
 #define NETC_PKT_FLAG_BIGRAM     0x02  // Bigram context model active
 #define NETC_PKT_FLAG_PASSTHRU   0x04  // Uncompressed passthrough (see AD-006)
-#define NETC_PKT_FLAG_DICT_ID    0x08  // Explicit dict_id present in stream header
+#define NETC_PKT_FLAG_DICT_ID    0x08  // Dictionary model_id verified
+#define NETC_PKT_FLAG_LZ77       0x10  // LZ77 within-packet compression
+#define NETC_PKT_FLAG_MREG       0x20  // Multi-region tANS (multiple buckets)
+#define NETC_PKT_FLAG_X2         0x40  // Dual-interleaved tANS streams
+#define NETC_PKT_FLAG_RLE        0x80  // RLE pre-pass applied
+```
+
+#### Configuration flags (`NETC_CFG_FLAG_*`)
+
+```c
+#define NETC_CFG_FLAG_STATEFUL    0x01  // Ordered sequential payloads
+#define NETC_CFG_FLAG_STATELESS   0x02  // Independent payloads
+#define NETC_CFG_FLAG_DELTA       0x04  // Enable inter-packet delta prediction
+#define NETC_CFG_FLAG_BIGRAM      0x08  // Enable bigram context model
+#define NETC_CFG_FLAG_STATS       0x10  // Enable statistics collection
+#define NETC_CFG_FLAG_COMPACT_HDR 0x20  // Use compact 2-4B packet header (see §9.1a)
 ```
 
 ---

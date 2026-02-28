@@ -28,12 +28,17 @@ Version: **0.1.0** — All public functions declared in `include/netc.h`.
 #define NETC_VERSION_STR    "0.1.0"
 
 #define NETC_MAX_PACKET_SIZE  65535U   // max input size (bytes)
-#define NETC_MAX_OVERHEAD     8U       // max bytes added by header
-#define NETC_HEADER_SIZE      8U       // compressed packet header size
+#define NETC_MAX_OVERHEAD     8U       // max bytes added by header (conservative bound)
+#define NETC_HEADER_SIZE      8U       // legacy compressed packet header size
+
+// Compact header constants (used when NETC_CFG_FLAG_COMPACT_HDR is set)
+#define NETC_COMPACT_HDR_MIN  2U       // compact header size for packets <= 127B
+#define NETC_COMPACT_HDR_MAX  4U       // compact header size for packets > 127B
 ```
 
 - Input packets exceeding `NETC_MAX_PACKET_SIZE` return `NETC_ERR_TOOBIG`.
 - The output buffer must be at least `src_size + NETC_MAX_OVERHEAD` bytes. Use `netc_compress_bound()` to compute this safely.
+- `NETC_MAX_OVERHEAD` remains 8 for backward compatibility; compact mode actual overhead is 2-4 bytes.
 
 ---
 
@@ -69,15 +74,22 @@ Set by the compressor in the packet header; read by the decompressor.
 | `NETC_PKT_FLAG_DELTA`    | `0x01` | Payload was delta-encoded |
 | `NETC_PKT_FLAG_BIGRAM`   | `0x02` | Bigram context model active |
 | `NETC_PKT_FLAG_PASSTHRU` | `0x04` | Uncompressed passthrough payload |
-| `NETC_PKT_FLAG_DICT_ID`  | `0x08` | Dictionary model_id present in header |
+| `NETC_PKT_FLAG_DICT_ID`  | `0x08` | Dictionary model_id verified |
+| `NETC_PKT_FLAG_LZ77`     | `0x10` | LZ77 within-packet compression |
+| `NETC_PKT_FLAG_MREG`     | `0x20` | Multi-region tANS (multiple buckets per packet) |
+| `NETC_PKT_FLAG_X2`       | `0x40` | Dual-interleaved tANS streams |
+| `NETC_PKT_FLAG_RLE`      | `0x80` | RLE pre-pass applied |
 
 ### Algorithm identifiers (`NETC_ALG_*`)
 
 | Constant | Value | Description |
 |----------|------:|-------------|
-| `NETC_ALG_TANS`     | `0x01` | tANS/FSE — primary codec |
-| `NETC_ALG_RANS`     | `0x02` | rANS — planned for v0.2 |
-| `NETC_ALG_PASSTHRU` | `0xFF` | Uncompressed passthrough |
+| `NETC_ALG_TANS`      | `0x01` | tANS/FSE — primary codec. Upper 4 bits encode bucket index. |
+| `NETC_ALG_RANS`      | `0x02` | rANS — planned for v0.2 |
+| `NETC_ALG_TANS_PCTX` | `0x03` | Per-position context-adaptive tANS |
+| `NETC_ALG_LZP`       | `0x04` | LZP XOR pre-filter + tANS. Upper 4 bits encode bucket index. |
+| `NETC_ALG_LZ77X`     | `0x05` | Cross-packet LZ77 (ring buffer history) |
+| `NETC_ALG_PASSTHRU`  | `0xFF` | Uncompressed passthrough |
 
 ### Configuration flags (`NETC_CFG_FLAG_*`)
 
@@ -85,11 +97,12 @@ Passed to `netc_ctx_create` via `netc_cfg_t.flags`.
 
 | Flag | Value | Description |
 |------|------:|-------------|
-| `NETC_CFG_FLAG_STATEFUL`  | `0x01` | Ordered sequential payloads (accumulates ring buffer history) |
-| `NETC_CFG_FLAG_STATELESS` | `0x02` | Independent payloads (no shared history) |
-| `NETC_CFG_FLAG_DELTA`     | `0x04` | Enable inter-packet delta prediction |
-| `NETC_CFG_FLAG_BIGRAM`    | `0x08` | Enable bigram context model |
-| `NETC_CFG_FLAG_STATS`     | `0x10` | Enable statistics collection |
+| `NETC_CFG_FLAG_STATEFUL`    | `0x01` | Ordered sequential payloads (accumulates ring buffer history) |
+| `NETC_CFG_FLAG_STATELESS`   | `0x02` | Independent payloads (no shared history) |
+| `NETC_CFG_FLAG_DELTA`       | `0x04` | Enable inter-packet delta prediction |
+| `NETC_CFG_FLAG_BIGRAM`      | `0x08` | Enable bigram context model |
+| `NETC_CFG_FLAG_STATS`       | `0x10` | Enable statistics collection |
+| `NETC_CFG_FLAG_COMPACT_HDR` | `0x20` | Use compact 2-4B packet header (see RFC-001 §9.1a). Must be set on both compressor and decompressor contexts. Also enables ANS state compaction (2B instead of 4B). |
 
 ---
 

@@ -34,14 +34,19 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-/* Match the blob size from netc_dict.c (v0.3: 16 buckets + 4 bigram classes) */
+/* Match the blob size from netc_dict.c */
 #define NETC_CTX_COUNT        16U
 #define NETC_BIGRAM_CTX_COUNT  4U
 #define NETC_TANS_SYMBOLS     256U
 #define NETC_TANS_TABLE_SIZE  4096U
-/* 8 (header) + 16*256*2 (unigram) + 16*4*256*2 (bigram) + 4 (crc) = 40972 */
-#define EXPECTED_BLOB_SIZE  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
-                             NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
+#define NETC_LZP_HT_SIZE     131072U
+/* v3 (no LZP): 8 + 16*256*2 + 16*4*256*2 + 4 = 40972 */
+#define EXPECTED_BLOB_SIZE_V3  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                                NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
+/* v4 with LZP: base(40968) + 4 + 131072*2 + 4 = 303120 */
+#define EXPECTED_BLOB_SIZE_V4  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                                NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                                4U + NETC_LZP_HT_SIZE * 2U + 4U)
 
 /* =========================================================================
  * Sample training data — representative byte sequences
@@ -240,7 +245,8 @@ void test_save_blob_size(void) {
     size_t sz = 0;
     TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(d, &blob, &sz));
     TEST_ASSERT_NOT_NULL(blob);
-    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE, sz);
+    /* v4 with LZP table */
+    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V4, sz);
 
     netc_dict_free(d);
     netc_dict_free_blob(blob);
@@ -276,10 +282,11 @@ void test_load_null_data(void) {
 }
 
 void test_load_null_out(void) {
-    uint8_t buf[EXPECTED_BLOB_SIZE];
-    memset(buf, 0, sizeof(buf));
+    uint8_t *buf = (uint8_t *)calloc(1, EXPECTED_BLOB_SIZE_V4);
+    TEST_ASSERT_NOT_NULL(buf);
     TEST_ASSERT_EQUAL_INT(NETC_ERR_INVALID_ARG,
-        netc_dict_load(buf, sizeof(buf), NULL));
+        netc_dict_load(buf, EXPECTED_BLOB_SIZE_V4, NULL));
+    free(buf);
 }
 
 void test_load_short_blob(void) {
@@ -291,13 +298,14 @@ void test_load_short_blob(void) {
 }
 
 void test_load_wrong_magic(void) {
-    uint8_t buf[EXPECTED_BLOB_SIZE];
-    memset(buf, 0, sizeof(buf));
+    uint8_t *buf = (uint8_t *)calloc(1, EXPECTED_BLOB_SIZE_V4);
+    TEST_ASSERT_NOT_NULL(buf);
     buf[0] = 0xDE; buf[1] = 0xAD; buf[2] = 0xBE; buf[3] = 0xEF;
     netc_dict_t *d = NULL;
     TEST_ASSERT_EQUAL_INT(NETC_ERR_DICT_INVALID,
-        netc_dict_load(buf, sizeof(buf), &d));
+        netc_dict_load(buf, EXPECTED_BLOB_SIZE_V4, &d));
     TEST_ASSERT_NULL(d);
+    free(buf);
 }
 
 void test_load_wrong_version(void) {
@@ -309,7 +317,7 @@ void test_load_wrong_version(void) {
     netc_dict_save(src, &blob, &sz);
     netc_dict_free(src);
 
-    ((uint8_t *)blob)[4] = 0x99;  /* corrupt version */
+    ((uint8_t *)blob)[4] = 0x99;  /* corrupt version (v3 and v4 accepted, 0x99 is not) */
 
     netc_dict_t *d = NULL;
     TEST_ASSERT_EQUAL_INT(NETC_ERR_VERSION,
@@ -390,7 +398,7 @@ void test_roundtrip_with_training_data(void) {
     void *blob = NULL;
     size_t sz = 0;
     TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_save(src, &blob, &sz));
-    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE, sz);
+    TEST_ASSERT_EQUAL_UINT(EXPECTED_BLOB_SIZE_V4, sz);
 
     netc_dict_t *loaded = NULL;
     TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_load(blob, sz, &loaded));

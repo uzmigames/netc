@@ -122,3 +122,56 @@ Field classes are inferred from the training corpus (entropy + variance per byte
 - This keeps the core implementation clean C11 while remaining buildable on all target toolchains.
 
 **Scope**: `netc_platform.h` is an internal header only. It is not part of the public `netc.h` API.
+
+### AD-009: Compact packet header (8B → 2-4B)
+
+**Decision**: Add an opt-in compact header mode (`NETC_CFG_FLAG_COMPACT_HDR`) that reduces the per-packet header from 8 bytes to 2-4 bytes by eliminating redundant fields.
+
+**Eliminated fields**:
+- `compressed_size`: derivable as `src_size - header_size` (caller provides `src_size`)
+- `model_id`: known from `ctx->dict->model_id` in stateful mode
+- `context_seq`: tracked internally by both compressor and decompressor
+
+**Remaining fields** encoded compactly:
+- Byte 0: `PACKET_TYPE` — structured uint8 encoding (flags + algorithm) via 144-entry lookup table
+- Byte 1: `[E][SSSSSSS]` — E=0: size in 7 bits (2B total); E=1: extended uint16 LE in bytes 2-3 (4B total)
+
+**Rationale**:
+- 8B header = 12.5% overhead on 64B packets — the single largest contributor to ratio gap vs. Oodle
+- Oodle has 0 bytes of per-packet overhead; compact header closes 6B of the gap
+- Opt-in preserves backward compatibility; legacy 8B header remains the default
+- Packet type encoding is structured arithmetic (not a flat lookup table), with const decode table for O(1) decode
+
+**Measured impact** (WL-001 64B, compact vs legacy): 0.908 → 0.814 (6B saved).
+
+### AD-010: ANS state compaction (4B → 2B)
+
+**Decision**: In compact header mode, encode the tANS initial state as `uint16` (2 bytes) instead of `uint32` (4 bytes).
+
+**Rationale**:
+- tANS state range is [TABLE_SIZE, 2*TABLE_SIZE) = [4096, 8192) — only 13 bits of information
+- A `uint16` holds up to 65535, far more than needed for the 13-bit range
+- 2B savings per single-region tANS packet; 4B savings per X2 (dual-interleaved) packet
+- Combined with compact header: 8B total savings on 64B packets (12.5% → 3.1% overhead)
+- Only active in compact mode; stateless path always uses legacy 4B for compatibility
+
+**Measured impact** (WL-001 64B, compact+ANS vs compact-only): 0.814 → 0.783 (additional 2B saved).
+
+### AD-011: LZP XOR pre-filter (position-aware order-1 context)
+
+**Decision**: Before tANS encoding, XOR each byte with a position-aware order-1 context prediction. Correctly predicted bytes become `0x00`, concentrating the distribution for better entropy coding.
+
+**LZP model**:
+- Context: `hash(previous_byte, byte_position_in_packet)` → predicted byte
+- Hash table: 131072 entries (2^17), 256 KB, FNV-1a hash
+- Training: Boyer-Moore majority vote with verification pass (40% confidence threshold)
+- tANS tables retrained on LZP-filtered data during dictionary training
+
+**Why XOR filter over flag-bit LZP**: Analysis showed that pure flag-bit LZP (predict/reconstruct with explicit flag bitstream) doesn't outperform the XOR approach for the target workloads. The XOR filter:
+- Preserves the data size (no flag bitstream overhead)
+- Feeds directly into tANS multi-region encoding without format change
+- Benefits from tANS being trained on the filtered distribution
+
+**Interaction with delta**: LZP XOR is applied when delta was NOT applied. Composing LZP XOR + XOR delta is mathematically equivalent to plain XOR delta (predictions cancel: `(curr^pred)^(prev^pred) = curr^prev`). This is by design — the two stages are mutually exclusive, not composable.
+
+**Measured impact**: LZP improves first-packet ratio where delta is unavailable. For subsequent packets with delta enabled, delta takes priority as it exploits temporal correlation directly.

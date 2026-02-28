@@ -91,6 +91,7 @@ typedef struct {
     int ci_check;
     int no_dict;
     int no_delta;
+    int compact_hdr;
     uint8_t simd_level;
 
     /* Baseline options */
@@ -124,6 +125,7 @@ static void usage(const char *prog)
         "  --ci-check                Run CI gates and exit 0=pass / 1=fail\n"
         "  --no-dict                 Skip dictionary training (netc only)\n"
         "  --no-delta                Disable delta encoding (netc only)\n"
+        "  --compact-hdr             Use compact packet headers (netc only)\n"
         "  --simd=LEVEL              auto|generic|sse42|avx2 [default: auto]\n"
         "  --baseline-dir=DIR        Directory for baseline JSON files\n"
         "  --save-baseline           Save results as new baseline\n"
@@ -210,6 +212,7 @@ static int parse_args(int argc, char **argv, bench_args_t *a)
         if (strcmp(arg, "--ci-check")       == 0) { a->ci_check      = 1; continue; }
         if (strcmp(arg, "--no-dict")        == 0) { a->no_dict        = 1; continue; }
         if (strcmp(arg, "--no-delta")       == 0) { a->no_delta       = 1; continue; }
+        if (strcmp(arg, "--compact-hdr")    == 0) { a->compact_hdr    = 1; continue; }
         if (strcmp(arg, "--save-baseline")  == 0) { a->save_baseline  = 1; continue; }
         if (strcmp(arg, "--check-baseline") == 0) { a->check_baseline = 1; continue; }
         if (strcmp(arg, "--with-oodle")     == 0) { a->with_oodle     = 1; continue; }
@@ -370,8 +373,9 @@ int main(int argc, char **argv)
     if (!reporter) { fprintf(stderr, "OOM\n"); return 2; }
     bench_reporter_begin(reporter, NETC_VERSION_STR, "");
 
-    uint32_t flags = NETC_CFG_FLAG_STATEFUL;
-    if (!args.no_delta) flags |= NETC_CFG_FLAG_DELTA;
+    uint32_t flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    if (!args.no_delta)   flags |= NETC_CFG_FLAG_DELTA;
+    if (args.compact_hdr) flags |= NETC_CFG_FLAG_COMPACT_HDR;
 
     /* Allocate result storage */
     bench_result_t *results = (bench_result_t *)calloc(BENCH_MAX_RESULTS,

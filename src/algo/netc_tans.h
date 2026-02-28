@@ -238,4 +238,38 @@ int netc_tans_decode_x2(
     uint32_t                 initial_state1
 );
 
+/* =========================================================================
+ * Per-position context-adaptive tANS encoder (PCTX)
+ *
+ * Encodes src[0..src_size) in a SINGLE ANS stream, switching the
+ * probability table per byte offset: tables[netc_ctx_bucket(offset)].
+ * This gives per-position entropy specialization with ZERO descriptor
+ * overhead compared to MREG's per-region streams.
+ *
+ * Returns final state (initial state for decoder), or 0 on error.
+ * ========================================================================= */
+
+uint32_t netc_tans_encode_pctx(
+    const netc_tans_table_t *tables,   /* array of NETC_CTX_COUNT tables */
+    const uint8_t           *src,
+    size_t                   src_size,
+    netc_bsw_t              *bsw,
+    uint32_t                 initial_state
+);
+
+/* =========================================================================
+ * Per-position context-adaptive tANS decoder (PCTX)
+ *
+ * Decodes dst_size symbols, switching tables per byte offset.
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_pctx(
+    const netc_tans_table_t *tables,   /* array of NETC_CTX_COUNT tables */
+    netc_bsr_t              *bsr,
+    uint8_t                 *dst,
+    size_t                   dst_size,
+    uint32_t                 initial_state
+);
+
 #endif /* NETC_TANS_H */

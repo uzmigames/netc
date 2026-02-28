@@ -11,6 +11,7 @@
 #include "../util/netc_platform.h"
 #include "../algo/netc_tans.h"
 #include "../algo/netc_delta.h"
+#include "../algo/netc_lzp.h"
 #include "../simd/netc_simd.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -22,7 +23,7 @@
 #define NETC_DEFAULT_RING_SIZE  (64u * 1024u)  /* 64 KB */
 #define NETC_DEFAULT_ARENA_SIZE (NETC_MAX_PACKET_SIZE * 2u + 64u)  /* ~131 KB */
 #define NETC_DICT_MAGIC         0x4E455443U    /* "NETC" */
-#define NETC_DICT_VERSION       3U             /* v0.3: bigram sub-tables (4 classes × 16 buckets) */
+#define NETC_DICT_VERSION       4U             /* v0.4: LZP hash-prediction table */
 
 /* =========================================================================
  * Dictionary internals
@@ -37,10 +38,10 @@
  */
 struct netc_dict {
     uint32_t magic;      /* NETC_DICT_MAGIC — sanity check */
-    uint8_t  version;    /* NETC_DICT_VERSION (= 3) */
+    uint8_t  version;    /* NETC_DICT_VERSION (= 4) */
     uint8_t  model_id;   /* 1–254; 0 = passthrough only; 255 = reserved */
     uint8_t  ctx_count;  /* Number of context buckets stored (= NETC_CTX_COUNT) */
-    uint8_t  _pad;
+    uint8_t  dict_flags; /* NETC_DICT_FLAG_* bitmask (was _pad in v3) */
 
     /* Per-context-bucket tANS tables — 16 tables in v0.2+ */
     netc_tans_table_t tables[NETC_CTX_COUNT];
@@ -51,8 +52,17 @@ struct netc_dict {
      * Only populated when trained with NETC_CFG_FLAG_BIGRAM. */
     netc_tans_table_t bigram_tables[NETC_CTX_COUNT][NETC_BIGRAM_CTX_COUNT];
 
+    /* LZP hash table (v0.4+, optional).
+     * Maps 3-byte context hashes to predicted next bytes.
+     * NULL when no LZP model is present (v3 backward compat).
+     * Allocated as a separate block of NETC_LZP_HT_SIZE entries. */
+    netc_lzp_entry_t *lzp_table;
+
     uint32_t checksum;   /* CRC32 of all preceding fields */
 };
+
+/* Dictionary flags (dict_flags field) */
+#define NETC_DICT_FLAG_LZP   0x01U  /* LZP table is present in blob */
 
 /* =========================================================================
  * Context internals
@@ -138,6 +148,335 @@ static NETC_INLINE void netc_hdr_read(const void *src, netc_pkt_header_t *h) {
     h->algorithm       = b[5];
     h->model_id        = b[6];
     h->context_seq     = b[7];
+}
+
+/* =========================================================================
+ * Compact packet header — 2 or 4 bytes (opt-in via NETC_CFG_FLAG_COMPACT_HDR)
+ *
+ * Byte 0:  PACKET_TYPE (flags + algorithm + bucket packed into one byte)
+ * Byte 1:  [E][SSSSSSS]
+ *           E=0: original_size = SSSSSSS (0-127).  Header = 2 bytes.
+ *           E=1: bytes 2-3 = original_size u16 LE.  Header = 4 bytes.
+ *
+ * Eliminated fields (derived at runtime):
+ *   compressed_size = src_size - header_size
+ *   model_id        = ctx->dict->model_id
+ *   context_seq     = ctx->context_seq
+ * ========================================================================= */
+
+/* --- Packet type encoding (byte 0) ---
+ *
+ * Non-bucketed (0x00-0x0F):
+ *   0x00 PASSTHRU             0x08 TANS_MREG
+ *   0x01 PASSTHRU+LZ77        0x09 TANS_MREG+DELTA
+ *   0x02 PASSTHRU+LZ77+DELTA  0x0A TANS_MREG+X2
+ *   0x03 PASSTHRU+RLE         0x0B TANS_MREG+X2+DELTA
+ *   0x04 TANS_PCTX            0x0C TANS_MREG+BIGRAM
+ *   0x05 TANS_PCTX+DELTA      0x0D TANS_MREG+BIGRAM+DELTA
+ *   0x06 TANS_PCTX+LZP        0x0E LZ77X
+ *   0x07 TANS_PCTX+LZP+DELTA  0x0F reserved
+ *
+ * Bucketed (base + bucket[0..15]):
+ *   0x10-0x1F TANS              0x50-0x5F TANS+X2
+ *   0x20-0x2F TANS+DELTA        0x60-0x6F TANS+X2+DELTA
+ *   0x30-0x3F TANS+BIGRAM       0x70-0x7F LZP
+ *   0x40-0x4F TANS+BIGRAM+DELTA 0x80-0x8F LZP+DELTA
+ *
+ *   0xFF = invalid / legacy sentinel
+ */
+
+typedef struct {
+    uint8_t flags;
+    uint8_t algorithm;
+} netc_pkt_type_entry_t;
+
+/* Decode table: pkt_type byte → (flags, algorithm).
+ * Entries with flags==0xFF are invalid. */
+static const netc_pkt_type_entry_t netc_pkt_type_table[256] = {
+    /* 0x00-0x03: Passthrough variants */
+    [0x00] = { NETC_PKT_FLAG_PASSTHRU | NETC_PKT_FLAG_DICT_ID, NETC_ALG_PASSTHRU },
+    [0x01] = { NETC_PKT_FLAG_PASSTHRU | NETC_PKT_FLAG_LZ77 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_PASSTHRU },
+    [0x02] = { NETC_PKT_FLAG_PASSTHRU | NETC_PKT_FLAG_LZ77 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_PASSTHRU },
+    [0x03] = { NETC_PKT_FLAG_PASSTHRU | NETC_PKT_FLAG_RLE | NETC_PKT_FLAG_DICT_ID, NETC_ALG_PASSTHRU },
+
+    /* 0x04-0x07: PCTX variants */
+    [0x04] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX },
+    [0x05] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX },
+    [0x06] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
+    [0x07] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
+
+    /* 0x08-0x0D: MREG variants */
+    [0x08] = { NETC_PKT_FLAG_MREG | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS },
+    [0x09] = { NETC_PKT_FLAG_MREG | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS },
+    [0x0A] = { NETC_PKT_FLAG_MREG | NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS },
+    [0x0B] = { NETC_PKT_FLAG_MREG | NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS },
+    [0x0C] = { NETC_PKT_FLAG_MREG | NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS },
+    [0x0D] = { NETC_PKT_FLAG_MREG | NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS },
+
+    /* 0x0E: LZ77X */
+    [0x0E] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZ77X },
+
+    /* 0x10-0x1F: TANS + bucket 0-15 */
+    [0x10] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (0u<<4) },
+    [0x11] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (1u<<4) },
+    [0x12] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (2u<<4) },
+    [0x13] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (3u<<4) },
+    [0x14] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (4u<<4) },
+    [0x15] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (5u<<4) },
+    [0x16] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (6u<<4) },
+    [0x17] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (7u<<4) },
+    [0x18] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (8u<<4) },
+    [0x19] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (9u<<4) },
+    [0x1A] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (10u<<4) },
+    [0x1B] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (11u<<4) },
+    [0x1C] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (12u<<4) },
+    [0x1D] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (13u<<4) },
+    [0x1E] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (14u<<4) },
+    [0x1F] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (15u<<4) },
+
+    /* 0x20-0x2F: TANS + DELTA + bucket 0-15 */
+    [0x20] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (0u<<4) },
+    [0x21] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (1u<<4) },
+    [0x22] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (2u<<4) },
+    [0x23] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (3u<<4) },
+    [0x24] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (4u<<4) },
+    [0x25] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (5u<<4) },
+    [0x26] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (6u<<4) },
+    [0x27] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (7u<<4) },
+    [0x28] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (8u<<4) },
+    [0x29] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (9u<<4) },
+    [0x2A] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (10u<<4) },
+    [0x2B] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (11u<<4) },
+    [0x2C] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (12u<<4) },
+    [0x2D] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (13u<<4) },
+    [0x2E] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (14u<<4) },
+    [0x2F] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (15u<<4) },
+
+    /* 0x30-0x3F: TANS + BIGRAM + bucket 0-15 */
+    [0x30] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (0u<<4) },
+    [0x31] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (1u<<4) },
+    [0x32] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (2u<<4) },
+    [0x33] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (3u<<4) },
+    [0x34] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (4u<<4) },
+    [0x35] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (5u<<4) },
+    [0x36] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (6u<<4) },
+    [0x37] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (7u<<4) },
+    [0x38] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (8u<<4) },
+    [0x39] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (9u<<4) },
+    [0x3A] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (10u<<4) },
+    [0x3B] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (11u<<4) },
+    [0x3C] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (12u<<4) },
+    [0x3D] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (13u<<4) },
+    [0x3E] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (14u<<4) },
+    [0x3F] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (15u<<4) },
+
+    /* 0x40-0x4F: TANS + BIGRAM + DELTA + bucket 0-15 */
+    [0x40] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (0u<<4) },
+    [0x41] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (1u<<4) },
+    [0x42] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (2u<<4) },
+    [0x43] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (3u<<4) },
+    [0x44] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (4u<<4) },
+    [0x45] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (5u<<4) },
+    [0x46] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (6u<<4) },
+    [0x47] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (7u<<4) },
+    [0x48] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (8u<<4) },
+    [0x49] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (9u<<4) },
+    [0x4A] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (10u<<4) },
+    [0x4B] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (11u<<4) },
+    [0x4C] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (12u<<4) },
+    [0x4D] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (13u<<4) },
+    [0x4E] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (14u<<4) },
+    [0x4F] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (15u<<4) },
+
+    /* 0x50-0x5F: TANS + X2 + bucket 0-15 */
+    [0x50] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (0u<<4) },
+    [0x51] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (1u<<4) },
+    [0x52] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (2u<<4) },
+    [0x53] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (3u<<4) },
+    [0x54] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (4u<<4) },
+    [0x55] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (5u<<4) },
+    [0x56] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (6u<<4) },
+    [0x57] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (7u<<4) },
+    [0x58] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (8u<<4) },
+    [0x59] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (9u<<4) },
+    [0x5A] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (10u<<4) },
+    [0x5B] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (11u<<4) },
+    [0x5C] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (12u<<4) },
+    [0x5D] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (13u<<4) },
+    [0x5E] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (14u<<4) },
+    [0x5F] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (15u<<4) },
+
+    /* 0x60-0x6F: TANS + X2 + DELTA + bucket 0-15 */
+    [0x60] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (0u<<4) },
+    [0x61] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (1u<<4) },
+    [0x62] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (2u<<4) },
+    [0x63] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (3u<<4) },
+    [0x64] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (4u<<4) },
+    [0x65] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (5u<<4) },
+    [0x66] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (6u<<4) },
+    [0x67] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (7u<<4) },
+    [0x68] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (8u<<4) },
+    [0x69] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (9u<<4) },
+    [0x6A] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (10u<<4) },
+    [0x6B] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (11u<<4) },
+    [0x6C] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (12u<<4) },
+    [0x6D] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (13u<<4) },
+    [0x6E] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (14u<<4) },
+    [0x6F] = { NETC_PKT_FLAG_X2 | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS | (15u<<4) },
+
+    /* 0x70-0x7F: LZP + bucket 0-15 */
+    [0x70] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (0u<<4) },
+    [0x71] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (1u<<4) },
+    [0x72] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (2u<<4) },
+    [0x73] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (3u<<4) },
+    [0x74] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (4u<<4) },
+    [0x75] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (5u<<4) },
+    [0x76] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (6u<<4) },
+    [0x77] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (7u<<4) },
+    [0x78] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (8u<<4) },
+    [0x79] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (9u<<4) },
+    [0x7A] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (10u<<4) },
+    [0x7B] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (11u<<4) },
+    [0x7C] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (12u<<4) },
+    [0x7D] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (13u<<4) },
+    [0x7E] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (14u<<4) },
+    [0x7F] = { NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (15u<<4) },
+
+    /* 0x80-0x8F: LZP + DELTA + bucket 0-15 */
+    [0x80] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (0u<<4) },
+    [0x81] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (1u<<4) },
+    [0x82] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (2u<<4) },
+    [0x83] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (3u<<4) },
+    [0x84] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (4u<<4) },
+    [0x85] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (5u<<4) },
+    [0x86] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (6u<<4) },
+    [0x87] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (7u<<4) },
+    [0x88] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (8u<<4) },
+    [0x89] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (9u<<4) },
+    [0x8A] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (10u<<4) },
+    [0x8B] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (11u<<4) },
+    [0x8C] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (12u<<4) },
+    [0x8D] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (13u<<4) },
+    [0x8E] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (14u<<4) },
+    [0x8F] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (15u<<4) },
+
+    /* 0x90-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
+    /* 0xFF: legacy sentinel */
+    [0xFF] = { 0xFF, 0xFF },
+};
+
+/** Encode flags + algorithm into a compact packet type byte.
+ *  Returns 0xFF on invalid/unrepresentable combination. */
+static NETC_INLINE uint8_t netc_compact_type_encode(uint8_t flags, uint8_t algorithm)
+{
+    uint8_t alg_lo  = algorithm & 0x0Fu;
+    uint8_t bucket  = (algorithm >> 4) & 0x0Fu;
+    uint8_t delta   = (flags & NETC_PKT_FLAG_DELTA)  ? 1u : 0u;
+    uint8_t bigram  = (flags & NETC_PKT_FLAG_BIGRAM) ? 1u : 0u;
+    uint8_t x2      = (flags & NETC_PKT_FLAG_X2)     ? 1u : 0u;
+
+    /* Passthrough */
+    if (flags & NETC_PKT_FLAG_PASSTHRU) {
+        if (flags & NETC_PKT_FLAG_LZ77)  return (uint8_t)(0x01u + delta);
+        if (flags & NETC_PKT_FLAG_RLE)   return 0x03u;
+        return 0x00u;
+    }
+
+    /* PCTX */
+    if (alg_lo == NETC_ALG_TANS_PCTX) {
+        uint8_t lzp = (bucket != 0) ? 1u : 0u; /* high nibble signals LZP */
+        return (uint8_t)(0x04u + delta + lzp * 2u);
+    }
+
+    /* LZ77X */
+    if (alg_lo == NETC_ALG_LZ77X) return 0x0Eu;
+
+    /* MREG */
+    if (flags & NETC_PKT_FLAG_MREG) {
+        if (bigram) return (uint8_t)(0x0Cu + delta);
+        if (x2)     return (uint8_t)(0x0Au + delta);
+        return (uint8_t)(0x08u + delta);
+    }
+
+    /* Single-region TANS with bucket */
+    if (alg_lo == NETC_ALG_TANS) {
+        uint8_t base;
+        if      (bigram && delta) base = 0x40u;
+        else if (bigram)          base = 0x30u;
+        else if (x2 && delta)     base = 0x60u;
+        else if (x2)              base = 0x50u;
+        else if (delta)           base = 0x20u;
+        else                      base = 0x10u;
+        return (uint8_t)(base + bucket);
+    }
+
+    /* LZP with bucket */
+    if (alg_lo == NETC_ALG_LZP) {
+        return (uint8_t)((delta ? 0x80u : 0x70u) + bucket);
+    }
+
+    return 0xFFu; /* unrepresentable */
+}
+
+/** Write a compact header. Returns bytes written (2 or 4). */
+static NETC_INLINE size_t netc_hdr_write_compact(void *dst,
+                                                   uint8_t pkt_type,
+                                                   uint16_t original_size)
+{
+    uint8_t *b = (uint8_t *)dst;
+    b[0] = pkt_type;
+    if (original_size <= 127u) {
+        b[1] = (uint8_t)original_size; /* bit 7 = 0 */
+        return 2u;
+    }
+    b[1] = 0x80u; /* extension marker */
+    netc_write_u16_le(b + 2, original_size);
+    return 4u;
+}
+
+/** Read a compact header. Returns bytes consumed (2 or 4), or 0 on error.
+ *  Fills hdr->original_size, hdr->flags, hdr->algorithm from wire bytes.
+ *  Caller must fill compressed_size, model_id, context_seq separately. */
+static NETC_INLINE size_t netc_hdr_read_compact(const void *src,
+                                                  size_t src_size,
+                                                  netc_pkt_header_t *hdr)
+{
+    if (NETC_UNLIKELY(src_size < 2u)) return 0u;
+    const uint8_t *b = (const uint8_t *)src;
+
+    uint8_t pkt_type = b[0];
+    const netc_pkt_type_entry_t *e = &netc_pkt_type_table[pkt_type];
+    /* Invalid type: both flags==0 and algorithm==0 means unused slot,
+     * except 0xFF which is the explicit sentinel. */
+    if (NETC_UNLIKELY(pkt_type == 0xFFu || (e->flags == 0u && e->algorithm == 0u)))
+        return 0u;
+
+    hdr->flags     = e->flags;
+    hdr->algorithm = e->algorithm;
+
+    if (!(b[1] & 0x80u)) {
+        /* Short form: original_size in 7 bits */
+        hdr->original_size = (uint16_t)(b[1] & 0x7Fu);
+        return 2u;
+    }
+    /* Long form: 16-bit original_size at bytes 2-3 */
+    if (NETC_UNLIKELY(src_size < 4u)) return 0u;
+    hdr->original_size = netc_read_u16_le(b + 2);
+    return 4u;
+}
+
+/** Unified header emit: writes compact or legacy header.
+ *  Returns the number of header bytes written. */
+static NETC_INLINE size_t netc_hdr_emit(void *dst,
+                                          const netc_pkt_header_t *h,
+                                          int compact)
+{
+    if (compact) {
+        uint8_t ptype = netc_compact_type_encode(h->flags, h->algorithm);
+        return netc_hdr_write_compact(dst, ptype, h->original_size);
+    }
+    netc_hdr_write(dst, h);
+    return NETC_HEADER_SIZE;
 }
 
 #endif /* NETC_INTERNAL_H */

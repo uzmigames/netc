@@ -13,31 +13,39 @@
 
 ## ✨ Key Features
 
-- ⚡ **≥ 2 GB/s compression throughput** on structured game/simulation packets (single core)
-- 🚀 **≥ 4 GB/s decompression throughput** — branch-free lookup decode path
-- 📦 **≥ 5 Mpps compression / ≥ 10 Mpps decompression** on 64-byte packets (single thread)
-- 📊 **≤ 0.55× compression ratio** on game state packets with a trained dictionary
-- 🔄 **ANS (Asymmetric Numeral Systems)** entropy coder — near-optimal fractional-bit precision
-  - rANS for packets > 64 bytes
-  - tANS (12-bit table, branch-free) for packets ≤ 64 bytes
-- 🧠 **Inter-packet delta prediction** — exploits temporal correlation in game/telemetry streams (+20–40% ratio)
-- 🔗 **TCP stateful mode** — ring buffer history, context accumulates across packets
-- 📡 **UDP stateless mode** — per-packet self-contained, sequence-numbered delta
-- 🎯 **Dictionary training** — train from representative packet corpus, freeze for hot-path
-- 🔒 **Zero dynamic allocation in hot path** — pre-allocated arena, deterministic latency
-- 🛡️ **Passthrough guarantee** — never expands payload; activates automatically on incompressible data
-- 🖥️ **SIMD acceleration** — SSE4.2, AVX2 (x86), ARM NEON; runtime dispatch, identical output across paths
-- ⚡ **Profile-Guided Optimization (PGO)** — CMake PGO build targets included
-- 📄 **Clean C11 API** — single header `netc.h`, zero dependencies beyond libc
-- 🔍 **Comparative benchmarks** — vs. zlib, LZ4, Zstd, static Huffman, Snappy; CI gates enforced
-- 🎮 **Native SDK for C++** — idiomatic wrappers with RAII, zero overhead, ready for Unreal Engine 5
-- 🕹️ **Native SDK for C#** — managed wrappers with `unsafe` pinning, ready for Unity and Godot 4
+- **Compact packet header** — 2-byte header for packets <= 127B, 4-byte for larger (vs. 8B legacy). Opt-in via `NETC_CFG_FLAG_COMPACT_HDR`
+- **ANS state compaction** — tANS state encoded as 2 bytes (vs. 4B) in compact mode, saving 2B per packet
+- **LZP prediction pre-filter** — position-aware order-1 context prediction XOR filter before tANS. Correctly predicted bytes become 0x00, improving entropy coding
+- **tANS (FSE) entropy coder** — 12-bit table (4096 entries), branch-free lookup decode, near-optimal fractional-bit precision
+- **Bigram context model** — order-1 bigram frequency tables per context bucket for better modeling
+- **Inter-packet delta prediction** — field-class aware (XOR for flags/floats, subtraction for counters), +20-40% ratio on game/telemetry streams
+- **Stateful mode** — ring buffer history, context accumulates across packets
+- **Stateless mode** — per-packet self-contained, no shared state
+- **Dictionary training** — train from representative packet corpus, freeze for hot-path. v4 format with LZP + bigram tables
+- **Zero dynamic allocation in hot path** — pre-allocated arena, deterministic latency
+- **Passthrough guarantee** — never expands payload; activates automatically on incompressible data
+- **SIMD acceleration** — SSE4.2, AVX2 (x86), ARM NEON; runtime dispatch, identical output across paths
+- **Profile-Guided Optimization (PGO)** — CMake PGO build targets included
+- **Clean C11 API** — single header `netc.h`, zero dependencies beyond libc
+- **Comparative benchmarks** — vs. zlib, LZ4, Zstd, static Huffman, Snappy; CI gates enforced
+- **Native SDK for C++** — idiomatic wrappers with RAII, zero overhead, ready for Unreal Engine 5
+- **Native SDK for C#** — managed wrappers with `unsafe` pinning, ready for Unity and Godot 4
 
 ---
 
-## 📊 Performance
+## Performance
 
-Benchmarks run on Linux x86_64, GCC 12 `-O3 -march=native`, single core, 100,000 iterations per measurement. Training corpus: 50,000 game state packets (WL-001).
+### Compression Ratios (measured, Windows x86_64 MSVC `/O2`, 50,000 iterations, 10,000 training packets)
+
+| Workload | Size | netc (legacy 8B hdr) | netc (compact hdr) | Oodle baseline |
+|----------|-----:|--------------------:|-------------------:|---------------:|
+| WL-001 Game State     | 64B  | 0.908 | **0.783** | 0.68 |
+| WL-002 Extended State | 128B | 0.673 | **0.626** | 0.52 |
+| WL-003 Full Snapshot  | 256B | 0.403 | **0.381** | 0.35 |
+
+Compact header mode (`NETC_CFG_FLAG_COMPACT_HDR`) saves 6-8 bytes per packet overhead (2B header + 2B ANS state vs. 8B header + 4B state).
+
+### Throughput Targets
 
 | Compressor | Compress (GB/s) | Decompress (GB/s) | Latency p99 (ns, 128B) | Ratio (game packets) |
 |------------|----------------:|------------------:|----------------------:|--------------------:|
@@ -46,10 +54,8 @@ Benchmarks run on Linux x86_64, GCC 12 `-O3 -march=native`, single core, 100,000
 | LZ4 (fast)            | 2.0  | 5.1  | 610  | 0.71 |
 | Zstd (level=1, dict)  | 0.9  | 2.8  | 1100 | 0.44 |
 | zlib (level=1)        | 0.3  | 0.9  | 3200 | 0.52 |
-| zlib (level=6)        | 0.1  | 0.9  | 9800 | 0.49 |
-| Huffman (static)      | 1.4  | 3.2  | 680  | 0.58 |
 
-> **Benchmarks are targets** for v0.1.0. Actual results will be published after the benchmark harness is implemented. See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for methodology and workload definitions.
+> Throughput targets are for server-grade hardware. See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for methodology and workload definitions.
 
 ---
 
@@ -172,26 +178,31 @@ netc_decompress_stateless(dict, dst, dst_size, recovered, sizeof(recovered), &re
 ```
 Packet Input
     │
-    ├── size < 8 bytes or high entropy? ──► Passthrough (NETC_PKT_FLAG_PASSTHRU)
+    ├── high entropy / incompressible? ──► Passthrough (verbatim + header)
     │
     ▼
-[Stage 1] Delta Prediction
-    │  delta[i] = packet[i] - predictor[i]   (inter-packet correlation)
-    │  Disabled for packets ≤ 64B
+[Stage 1] Delta Prediction (stateful, opt-in)
+    │  XOR for flags/floats, subtraction for counters
+    │  Field-class aware, not blind byte subtraction
     ▼
-[Stage 2] ANS Entropy Coding
-    │  packet ≤ 64B  →  tANS (12-bit table, branch-free, L1-cached)
-    │  packet > 64B  →  rANS (dual interleaved streams)
+[Stage 2] LZP XOR Pre-Filter (when dict has LZP table, no delta)
+    │  hash(prev_byte, position) → predicted_byte
+    │  XOR with prediction: correct predictions → 0x00
     ▼
-[Stage 3] Passthrough Check
-    │  compressed ≥ original? → emit original bytes
+[Stage 3] tANS Entropy Coding
+    │  12-bit table (4096 entries), branch-free decode
+    │  Multi-region bucket selection (HEADER/SUBHEADER/BODY/TAIL)
+    │  Per-position context (PCTX) or bigram context variants
     ▼
-Compressed bitstream (packet header + payload)
+[Stage 4] Competition & Passthrough Check
+    │  tANS vs LZ77 vs RLE vs passthrough — smallest wins
+    ▼
+Compressed bitstream (2-4B compact header or 8B legacy + payload)
 ```
 
-**Why ANS over Huffman?** ANS achieves fractional-bit precision vs. Huffman's integer-bit rounding — 5–15% better ratio on skewed byte distributions typical of game/telemetry packets. Decode speed is comparable with lookup tables.
+**Why ANS over Huffman?** ANS achieves fractional-bit precision vs. Huffman's integer-bit rounding — 5-15% better ratio on skewed byte distributions typical of game/telemetry packets.
 
-**Why delta prediction?** Game packets are temporally correlated: positions change by small deltas each tick, enum values repeat, counters increment by 1. Subtracting predicted values reduces residual entropy by 20–40% before ANS encoding.
+**Why LZP pre-filter?** Position-aware prediction captures per-offset byte distributions in structured packets. Correctly predicted bytes become 0x00, concentrating the distribution for much better tANS compression.
 
 See [docs/design/algorithm-decisions.md](docs/design/algorithm-decisions.md) for the full decision log.
 
