@@ -27,11 +27,11 @@
 ## 5. PGO Build Support
 - [x] 5.1 Add CMake PGO build targets (instrument, profile-run, optimized)
 - [x] 5.2 Document PGO build workflow in docs/ (docs/pgo-build.md)
-- [ ] 5.3 Benchmark: verify PGO build ≥ 5% faster than non-PGO on WL-001
+- [ ] 5.3 Benchmark: verify PGO build ≥ 5% faster than non-PGO on WL-001 (deferred: requires GCC/Clang, not available on Windows/MSVC)
 
 ## 6. Release Documentation
 - [x] 6.1 Finalize README.md (installation, quick start, API overview, benchmarks table)
 - [x] 6.2 Write CHANGELOG.md (v0.1.0 release notes)
 - [x] 6.3 Write docs/api-reference.md (all public functions documented)
 - [x] 6.4 Verify all RFC-002 CI gates pass (./bench --ci-check): PERF-03/04 latency and MEM-01 pass; PERF-01/02/05/06 throughput gates require server-grade hardware (continue-on-error=true in CI)
-- [ ] 6.5 Tag v0.1.0 release
+- [ ] 6.5 Tag v0.1.0 release (pending: awaiting final compression ratio improvements)

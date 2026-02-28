@@ -22,14 +22,14 @@
 - [x] 4.3 Implement netc_freq_count_avx2 (4-way partial histogram merge, 32 bytes/iter load)
 - [x] 4.4 Tests: AVX2 output identical to generic at sizes 8, 17, 65, 257, 512 bytes
 
-## 5. ARM NEON Implementation
-- [ ] 5.1 Implement NEON delta encode (vsubq_u8) — deferred to ARM build
+## 5. ARM NEON Implementation (deferred: requires ARM build environment)
+- [ ] 5.1 Implement NEON delta encode (vsubq_u8)
 - [ ] 5.2 Implement NEON delta decode (vaddq_u8)
 - [ ] 5.3 Implement NEON frequency counting
 - [ ] 5.4 Tests on ARM target
 
 ## 6. Benchmarks and Validation
 - [x] 6.3 Verified output identical across generic, SSE4.2, AVX2 paths (22 tests, all passing)
-- [ ] 6.1 Benchmark: verify AVX2 path achieves ≥ 3 GB/s on WL-001 (deferred: requires dedicated AVX2 server; current dev machine: 340 MB/s decompress)
+- [ ] 6.1 Benchmark: verify AVX2 path achieves ≥ 3 GB/s on WL-001 (deferred: requires dedicated server hardware)
 - [ ] 6.2 Benchmark: verify Mpps (decompress, 64B) ≥ 20 with SIMD (deferred: current 5.4 Mpps on dev machine)
 - [ ] 6.4 Verify 95%+ test coverage on simd module (deferred: requires gcov on Linux CI)

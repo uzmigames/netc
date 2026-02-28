@@ -810,16 +810,11 @@ netc_result_t netc_compress(
         int     used_x2   = 0;
         uint32_t tbl_idx  = 0;
 
-        /* When LZP is active in compact mode, strip BIGRAM from flags.
-         * Compact packet types for LZP (0x70-0x8F) don't encode BIGRAM,
-         * so the decompressor won't use bigram tables — the encoder must
-         * match by also using unigram tables.  PCTX handles LZP via its
-         * own compact type (0x06/0x07), so BIGRAM stripping is moot for
-         * PCTX since it already uses position-based table selection. */
+        /* When LZP is active in compact mode, suppress X2 (no compact
+         * type for LZP+X2).  BIGRAM is supported via 0x90-0xAF types. */
         uint32_t tans_ctx_flags = ctx->flags;
         if (did_lzp && compact_mode)
-            tans_ctx_flags = (tans_ctx_flags & ~(uint32_t)NETC_CFG_FLAG_BIGRAM)
-                             | NETC_INTERNAL_NO_X2;
+            tans_ctx_flags |= NETC_INTERNAL_NO_X2;
 
         if (try_tans_compress(dict, compress_src, src_size,
                               payload, payload_cap,
@@ -846,10 +841,10 @@ netc_result_t netc_compress(
                 size_t  lzp_cp = 0;
                 int     lzp_mreg = 0, lzp_x2 = 0;
                 uint32_t lzp_tbl = 0;
-                /* Strip DELTA and BIGRAM, suppress X2: LZP compact types
-                 * (0x70-0x8F) can't carry BIGRAM or X2 flags. */
+                /* Strip DELTA, suppress X2.  BIGRAM is now supported
+                 * via LZP+BIGRAM compact types (0x90-0xAF). */
                 uint32_t lzp_ctx = (ctx->flags
-                    & ~(uint32_t)(NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_BIGRAM))
+                    & ~(uint32_t)NETC_CFG_FLAG_DELTA)
                     | (compact_mode ? NETC_INTERNAL_NO_X2 : 0u);
                 if (try_tans_compress(dict, lzp_trial_src, src_size,
                                       lzp_trial_dst, sizeof(lzp_trial_dst),
@@ -1138,11 +1133,10 @@ case_b_skip:;
                                 dict->lzp_table, ctx->arena);
             raw_src = ctx->arena;
             fallback_lzp = 1;
-            /* LZP compact types (0x70-0x8F) can't encode BIGRAM or X2 —
-             * strip BIGRAM and suppress X2 to match the decompressor. */
+            /* Suppress X2 for LZP compact (no LZP+X2 type).
+             * BIGRAM is supported via 0x90-0xAF compact types. */
             if (compact_mode)
-                raw_ctx_flags = (raw_ctx_flags & ~(uint32_t)NETC_CFG_FLAG_BIGRAM)
-                                | NETC_INTERNAL_NO_X2;
+                raw_ctx_flags |= NETC_INTERNAL_NO_X2;
         }
         if (try_tans_compress(dict, raw_src, src_size,
                               payload, payload_cap,

@@ -197,6 +197,31 @@ void test_pkt_type_pctx_variants(void)
     TEST_ASSERT_EQUAL_UINT8(0x07, pt);
 }
 
+void test_pkt_type_lzp_bigram_bucket_roundtrip(void)
+{
+    for (uint8_t bucket = 0; bucket < 16; bucket++) {
+        uint8_t alg = (uint8_t)(NETC_ALG_LZP | (bucket << 4));
+
+        /* LZP + BIGRAM + bucket */
+        uint8_t pt = netc_compact_type_encode(
+            NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, alg);
+        TEST_ASSERT_EQUAL_UINT8(0x90u + bucket, pt);
+        TEST_ASSERT_EQUAL_UINT8(alg, netc_pkt_type_table[pt].algorithm);
+        TEST_ASSERT_BITS(NETC_PKT_FLAG_BIGRAM, NETC_PKT_FLAG_BIGRAM,
+                         netc_pkt_type_table[pt].flags);
+
+        /* LZP + BIGRAM + DELTA + bucket */
+        pt = netc_compact_type_encode(
+            NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, alg);
+        TEST_ASSERT_EQUAL_UINT8(0xA0u + bucket, pt);
+        TEST_ASSERT_EQUAL_UINT8(alg, netc_pkt_type_table[pt].algorithm);
+        TEST_ASSERT_BITS(NETC_PKT_FLAG_BIGRAM, NETC_PKT_FLAG_BIGRAM,
+                         netc_pkt_type_table[pt].flags);
+        TEST_ASSERT_BITS(NETC_PKT_FLAG_DELTA, NETC_PKT_FLAG_DELTA,
+                         netc_pkt_type_table[pt].flags);
+    }
+}
+
 void test_pkt_type_lz77x(void)
 {
     uint8_t pt = netc_compact_type_encode(NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZ77X);
@@ -207,7 +232,7 @@ void test_pkt_type_decode_table_consistency(void)
 {
     /* For every valid entry in the table, encoding the decoded (flags, alg)
      * must produce the same index. */
-    for (unsigned i = 0; i < 0x90; i++) {
+    for (unsigned i = 0; i < 0xB0; i++) {
         const netc_pkt_type_entry_t *e = &netc_pkt_type_table[i];
         if (e->flags == 0 && e->algorithm == 0 && i != 0x00) continue; /* unused slot */
         if (i == 0x0F) continue; /* reserved */
@@ -576,6 +601,76 @@ void test_compact_1byte_packet(void)
 }
 
 /* =========================================================================
+ * LZP + BIGRAM compact type round-trip tests
+ * ========================================================================= */
+
+void test_compact_lzp_bigram_roundtrip(void)
+{
+    /* LZP+BIGRAM compact types (0x90-0xAF) should produce valid
+     * compress/decompress round-trips when BIGRAM flag is set. */
+    netc_ctx_t *cctx = make_compact_ctx(s_dict, NETC_CFG_FLAG_BIGRAM);
+    netc_ctx_t *dctx = make_compact_ctx(s_dict, NETC_CFG_FLAG_BIGRAM);
+    TEST_ASSERT_NOT_NULL(cctx);
+    TEST_ASSERT_NOT_NULL(dctx);
+
+    size_t bound = netc_compress_bound(sizeof(s_repetitive));
+    uint8_t *cbuf = (uint8_t *)malloc(bound);
+    uint8_t dbuf[64];
+    size_t csz = 0, dsz = 0;
+
+    netc_result_t cr = netc_compress(cctx, s_repetitive, sizeof(s_repetitive),
+                                      cbuf, bound, &csz);
+    TEST_ASSERT_EQUAL_INT(NETC_OK, cr);
+
+    netc_result_t dr = netc_decompress(dctx, cbuf, csz, dbuf, sizeof(dbuf), &dsz);
+    TEST_ASSERT_EQUAL_INT(NETC_OK, dr);
+    TEST_ASSERT_EQUAL_UINT(sizeof(s_repetitive), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(s_repetitive, dbuf, sizeof(s_repetitive));
+
+    netc_ctx_destroy(dctx);
+    netc_ctx_destroy(cctx);
+    free(cbuf);
+}
+
+void test_compact_lzp_bigram_delta_roundtrip(void)
+{
+    /* LZP+BIGRAM+DELTA compact types (0xA0-0xAF) round-trip. */
+    netc_ctx_t *cctx = make_compact_ctx(s_dict,
+        NETC_CFG_FLAG_BIGRAM | NETC_CFG_FLAG_DELTA);
+    netc_ctx_t *dctx = make_compact_ctx(s_dict,
+        NETC_CFG_FLAG_BIGRAM | NETC_CFG_FLAG_DELTA);
+    TEST_ASSERT_NOT_NULL(cctx);
+    TEST_ASSERT_NOT_NULL(dctx);
+
+    size_t bound = netc_compress_bound(sizeof(s_skewed));
+    uint8_t *cbuf = (uint8_t *)malloc(bound);
+    uint8_t dbuf[128];
+    size_t csz, dsz;
+
+    /* Send 10 packets to exercise delta + LZP + BIGRAM across stream */
+    for (int i = 0; i < 10; i++) {
+        uint8_t pkt[128];
+        for (size_t j = 0; j < 128; j++)
+            pkt[j] = (uint8_t)((s_skewed[j] + (uint8_t)i) & 0xFF);
+
+        csz = 0; dsz = 0;
+        netc_result_t cr = netc_compress(cctx, pkt, sizeof(pkt), cbuf, bound, &csz);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(NETC_OK, cr,
+            "LZP+BIGRAM+DELTA compress should succeed");
+
+        netc_result_t dr = netc_decompress(dctx, cbuf, csz, dbuf, sizeof(dbuf), &dsz);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(NETC_OK, dr,
+            "LZP+BIGRAM+DELTA decompress should succeed");
+        TEST_ASSERT_EQUAL_UINT(sizeof(pkt), dsz);
+        TEST_ASSERT_EQUAL_MEMORY(pkt, dbuf, sizeof(pkt));
+    }
+
+    netc_ctx_destroy(dctx);
+    netc_ctx_destroy(cctx);
+    free(cbuf);
+}
+
+/* =========================================================================
  * ANS state compaction tests (4B→2B in compact mode)
  * ========================================================================= */
 
@@ -720,6 +815,7 @@ int main(void)
     RUN_TEST(test_pkt_type_passthru_roundtrip);
     RUN_TEST(test_pkt_type_tans_bucket_roundtrip);
     RUN_TEST(test_pkt_type_lzp_bucket_roundtrip);
+    RUN_TEST(test_pkt_type_lzp_bigram_bucket_roundtrip);
     RUN_TEST(test_pkt_type_mreg_variants);
     RUN_TEST(test_pkt_type_pctx_variants);
     RUN_TEST(test_pkt_type_lz77x);
@@ -742,6 +838,10 @@ int main(void)
     RUN_TEST(test_compact_delta_roundtrip);
     RUN_TEST(test_compact_multi_packet_roundtrip);
     RUN_TEST(test_compact_1byte_packet);
+
+    /* LZP + BIGRAM compact types */
+    RUN_TEST(test_compact_lzp_bigram_roundtrip);
+    RUN_TEST(test_compact_lzp_bigram_delta_roundtrip);
 
     /* ANS state compaction */
     RUN_TEST(test_compact_ans_state_saves_2_bytes);

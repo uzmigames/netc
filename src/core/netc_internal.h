@@ -360,7 +360,43 @@ static const netc_pkt_type_entry_t netc_pkt_type_table[256] = {
     [0x8E] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (14u<<4) },
     [0x8F] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (15u<<4) },
 
-    /* 0x90-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
+    /* 0x90-0x9F: LZP + BIGRAM + bucket 0-15 */
+    [0x90] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (0u<<4) },
+    [0x91] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (1u<<4) },
+    [0x92] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (2u<<4) },
+    [0x93] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (3u<<4) },
+    [0x94] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (4u<<4) },
+    [0x95] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (5u<<4) },
+    [0x96] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (6u<<4) },
+    [0x97] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (7u<<4) },
+    [0x98] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (8u<<4) },
+    [0x99] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (9u<<4) },
+    [0x9A] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (10u<<4) },
+    [0x9B] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (11u<<4) },
+    [0x9C] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (12u<<4) },
+    [0x9D] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (13u<<4) },
+    [0x9E] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (14u<<4) },
+    [0x9F] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (15u<<4) },
+
+    /* 0xA0-0xAF: LZP + BIGRAM + DELTA + bucket 0-15 */
+    [0xA0] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (0u<<4) },
+    [0xA1] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (1u<<4) },
+    [0xA2] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (2u<<4) },
+    [0xA3] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (3u<<4) },
+    [0xA4] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (4u<<4) },
+    [0xA5] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (5u<<4) },
+    [0xA6] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (6u<<4) },
+    [0xA7] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (7u<<4) },
+    [0xA8] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (8u<<4) },
+    [0xA9] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (9u<<4) },
+    [0xAA] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (10u<<4) },
+    [0xAB] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (11u<<4) },
+    [0xAC] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (12u<<4) },
+    [0xAD] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (13u<<4) },
+    [0xAE] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (14u<<4) },
+    [0xAF] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_LZP | (15u<<4) },
+
+    /* 0xB0-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
     /* 0xFF: legacy sentinel */
     [0xFF] = { 0xFF, 0xFF },
 };
@@ -412,7 +448,12 @@ static NETC_INLINE uint8_t netc_compact_type_encode(uint8_t flags, uint8_t algor
 
     /* LZP with bucket */
     if (alg_lo == NETC_ALG_LZP) {
-        return (uint8_t)((delta ? 0x80u : 0x70u) + bucket);
+        uint8_t base;
+        if      (bigram && delta) base = 0xA0u;
+        else if (bigram)          base = 0x90u;
+        else if (delta)           base = 0x80u;
+        else                      base = 0x70u;
+        return (uint8_t)(base + bucket);
     }
 
     return 0xFFu; /* unrepresentable */
