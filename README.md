@@ -1,7 +1,7 @@
 # netc — Network Compression Library
 
 [![Language](https://img.shields.io/badge/language-C11-orange.svg)](https://en.cppreference.com/w/c/11)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Coverage](https://img.shields.io/badge/coverage-95%25+-brightgreen.svg)](tests/)
 [![Version](https://img.shields.io/badge/version-0.1.0--dev-blue.svg)](CHANGELOG.md)
 
@@ -314,7 +314,7 @@ All contributions must pass tests and maintain coverage >= 95%.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).
 
 ---
 
