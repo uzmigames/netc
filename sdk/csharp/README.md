@@ -1,20 +1,20 @@
 # netc C# SDK
 
-.NET 9 P/Invoke wrappers for the netc compression library. Zero-GC `Span<byte>` hot path.
+.NET 9 P/Invoke wrappers for the netc compression library. Zero-GC `Span<byte>` hot path. Works with any .NET project, including Unity 2021+.
 
 ## Requirements
 
-- .NET 9.0+
-- `netc.dll` (Windows), `libnetc.so` (Linux), or `libnetc.dylib` (macOS) in the runtime search path
+- .NET 9.0+ (standalone) or Unity 2021.3+ (Mono/IL2CPP)
+- Native library: `netc.dll` (Windows), `libnetc.so` (Linux), `libnetc.dylib` (macOS)
 
-## Build
+## Build from Source
 
 ```bash
-# Build the native DLL first
+# 1. Build native shared library
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --target netc_shared
 
-# Build the C# SDK
+# 2. Build C# SDK
 cd sdk/csharp
 dotnet build --configuration Release
 ```
@@ -31,6 +31,205 @@ dotnet test --configuration Release
 
 56 xUnit tests covering roundtrip, stateless, error paths, disposal, and trainer.
 
+---
+
+## Quick Start
+
+```csharp
+using Netc;
+
+// 1. Train a dictionary from captured packets
+using var trainer = new NetcTrainer();
+foreach (var pkt in capturedPackets)
+    trainer.AddPacket(pkt);
+using var dict = trainer.Train(modelId: 1);
+
+// 2. Save dictionary for reuse
+byte[] blob = dict.Save();
+File.WriteAllBytes("game_traffic.dict", blob);
+
+// 3. Compress (TCP stateful, delta + compact headers)
+using var ctx = NetcContext.Create(dict, NetcMode.Stateful, level: 5,
+    extraFlags: 0x08 | 0x10); // DELTA | COMPACT_HDR
+
+byte[] dst = new byte[NetcContext.MaxCompressedSize(src.Length)];
+int written = ctx.Compress(src, dst);
+// send dst[..written] over network...
+
+// 4. Decompress on the other side
+byte[] recovered = new byte[65535];
+int recoveredLen = ctx.Decompress(dst.AsSpan(0, written), recovered);
+```
+
+---
+
+## Integration: Unity
+
+### 1. Build Native Libraries
+
+Build `netc` as a shared library for each target platform:
+
+```bash
+# Windows x64
+cmake -B build-win64 -G "Visual Studio 17 2022" -A x64
+cmake --build build-win64 --config Release --target netc_shared
+# Output: build-win64/Release/netc.dll
+
+# Linux x64 (dedicated server)
+cmake -B build-linux -DCMAKE_BUILD_TYPE=Release
+cmake --build build-linux --target netc_shared
+# Output: build-linux/libnetc.so
+
+# macOS (Apple Silicon)
+cmake -B build-macos -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build build-macos --target netc_shared
+# Output: build-macos/libnetc.dylib
+```
+
+### 2. Unity Project Structure
+
+Copy the native libraries and C# source files into your Unity project:
+
+```
+Assets/
+├── Plugins/
+│   └── netc/
+│       ├── x86_64/
+│       │   ├── netc.dll              # Windows x64
+│       │   ├── libnetc.so            # Linux x64
+│       │   └── netc.bundle           # macOS (rename .dylib)
+│       └── Android/
+│           └── arm64-v8a/
+│               └── libnetc.so        # Android ARM64
+├── Scripts/
+│   └── Netc/
+│       ├── NetcNative.cs
+│       ├── NetcResult.cs
+│       ├── NetcMode.cs
+│       ├── NetcException.cs
+│       ├── NetcStats.cs
+│       ├── NetcDict.cs
+│       ├── NetcContext.cs
+│       └── NetcTrainer.cs
+└── StreamingAssets/
+    └── game_traffic.dict              # Pre-trained dictionary
+```
+
+**Important**: In Unity's plugin import settings, set each native library's platform filter:
+- `netc.dll` → Windows x64
+- `libnetc.so` (Plugins/netc/x86_64/) → Linux x64
+- `netc.bundle` → macOS
+- `libnetc.so` (Plugins/netc/Android/) → Android ARM64
+
+### 3. Unity Compatibility Notes
+
+The C# SDK source files (`Netc.Core/*.cs`) work in Unity with minor adjustments:
+
+- **Namespace declaration**: Change `namespace Netc;` (file-scoped) to `namespace Netc { ... }` if using Unity < 2023 (C# 10 required for file-scoped namespaces)
+- **`nint`/`nuint`**: Available in Unity 2021.2+ (C# 9). For older versions, replace with `IntPtr` / `UIntPtr`
+- **`ReadOnlySpan<byte>`**: Available in Unity 2021.2+ via `System.Memory`. For older versions, use `byte[]` with `unsafe fixed`
+
+### 4. Usage in Unity (Mirror/FishNet/NGO)
+
+```csharp
+using UnityEngine;
+using Netc;
+
+public class NetcCompression : MonoBehaviour
+{
+    private NetcDict _dict;
+    private NetcContext _encCtx;
+    private NetcContext _decCtx;
+
+    // Pre-allocated buffers — zero GC in hot path
+    private byte[] _compressBuf;
+    private byte[] _decompressBuf;
+
+    void Awake()
+    {
+        // Load pre-trained dictionary from StreamingAssets
+        string dictPath = System.IO.Path.Combine(
+            Application.streamingAssetsPath, "game_traffic.dict");
+        byte[] blob = System.IO.File.ReadAllBytes(dictPath);
+        _dict = NetcDict.Load(blob);
+
+        // Create encoder/decoder contexts
+        // DELTA (0x08) | COMPACT_HDR (0x10) | STATEFUL added automatically
+        _encCtx = NetcContext.Create(_dict, NetcMode.Stateful, level: 5,
+            extraFlags: 0x08 | 0x10);
+        _decCtx = NetcContext.Create(_dict, NetcMode.Stateful, level: 5,
+            extraFlags: 0x08 | 0x10);
+
+        _compressBuf = new byte[NetcContext.MaxCompressedSize(65535)];
+        _decompressBuf = new byte[65535];
+    }
+
+    /// <summary>
+    /// Compress a packet before sending. Returns compressed bytes.
+    /// Call this from your transport layer's send path.
+    /// </summary>
+    public System.ArraySegment<byte> CompressPacket(byte[] data, int offset, int count)
+    {
+        int written = _encCtx.Compress(
+            new System.ReadOnlySpan<byte>(data, offset, count),
+            _compressBuf);
+        return new System.ArraySegment<byte>(_compressBuf, 0, written);
+    }
+
+    /// <summary>
+    /// Decompress a received packet. Returns decompressed bytes.
+    /// Call this from your transport layer's receive path.
+    /// </summary>
+    public System.ArraySegment<byte> DecompressPacket(byte[] data, int offset, int count)
+    {
+        int written = _decCtx.Decompress(
+            new System.ReadOnlySpan<byte>(data, offset, count),
+            _decompressBuf);
+        return new System.ArraySegment<byte>(_decompressBuf, 0, written);
+    }
+
+    /// <summary>
+    /// Reset compression state (e.g., on reconnect or scene change).
+    /// </summary>
+    public void ResetState()
+    {
+        _encCtx.Reset();
+        _decCtx.Reset();
+    }
+
+    void OnDestroy()
+    {
+        _encCtx?.Dispose();
+        _decCtx?.Dispose();
+        _dict?.Dispose();
+    }
+}
+```
+
+### 5. Training a Dictionary from Unity
+
+You can train a dictionary offline from captured game traffic:
+
+```csharp
+// Editor script or standalone tool
+using var trainer = new NetcTrainer();
+
+// Capture packets during a play session
+foreach (byte[] packet in recordedPackets)
+    trainer.AddPacket(packet);
+
+Debug.Log($"Training from {trainer.PacketCount} packets...");
+using var dict = trainer.Train(modelId: 1);
+
+// Save to StreamingAssets
+byte[] blob = dict.Save();
+System.IO.File.WriteAllBytes(
+    Application.streamingAssetsPath + "/game_traffic.dict", blob);
+Debug.Log("Dictionary saved.");
+```
+
+---
+
 ## API Reference
 
 All types are in the `Netc` namespace.
@@ -40,18 +239,11 @@ All types are in the `Netc` namespace.
 `IDisposable` dictionary wrapper. Thread-safe for concurrent reads.
 
 ```csharp
-using Netc;
-
-// Load from binary blob
 byte[] blob = File.ReadAllBytes("trained.dict");
 using var dict = NetcDict.Load(blob);
 
-// Save
 byte[] saved = dict.Save();
-
-// Inspect
 byte modelId = dict.ModelId;       // 1-254
-bool disposed = dict.IsDisposed;
 ```
 
 ### `NetcContext`
@@ -59,27 +251,19 @@ bool disposed = dict.IsDisposed;
 `IDisposable` compression context. NOT thread-safe — use one per connection per thread.
 
 ```csharp
-using Netc;
-
-// TCP stateful mode with delta + compact headers
 using var ctx = NetcContext.Create(dict, NetcMode.Stateful, level: 5,
-    extraFlags: 0x08 | 0x10);  // NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_COMPACT_HDR
+    extraFlags: 0x08 | 0x10);
 
-// Compress (zero-GC Span<byte> API)
-byte[] dst = new byte[NetcContext.MaxCompressedSize(src.Length)];
+// Compress / Decompress (zero-GC Span API)
 int written = ctx.Compress(src, dst);
-// Send dst[..written] over network
+int recovered = ctx.Decompress(compressed, output);
 
-// Decompress
-byte[] recovered = new byte[65535];
-int recoveredLen = ctx.Decompress(dst.AsSpan(0, written), recovered);
-
-// UDP stateless (no context state)
-int compLen = NetcContext.CompressStateless(dict, src, dst);
-int decLen = NetcContext.DecompressStateless(dict, dst.AsSpan(0, compLen), recovered);
+// Stateless (static methods)
+int len = NetcContext.CompressStateless(dict, src, dst);
+int len2 = NetcContext.DecompressStateless(dict, compressed, output);
 
 // Utilities
-ctx.Reset();                          // Reset ring buffer, keep dict
+ctx.Reset();
 byte simd = ctx.SimdLevel;            // 1=generic, 2=SSE4.2, 3=AVX2, 4=NEON
 NetcStats stats = ctx.GetStats();
 double ratio = stats.AverageRatio;
@@ -87,60 +271,27 @@ double ratio = stats.AverageRatio;
 
 ### `NetcTrainer`
 
-Corpus management and dictionary training.
-
 ```csharp
-using Netc;
-
 using var trainer = new NetcTrainer();
-
-// Add packets
-foreach (var pkt in capturedPackets)
-    trainer.AddPacket(pkt);
-
-int count = trainer.PacketCount;
-
-// Train
+trainer.AddPacket(packetBytes);
 using var dict = trainer.Train(modelId: 1);
-
-trainer.Reset();  // Clear corpus
+trainer.Reset();
 ```
 
 ### `NetcException`
 
-Maps `netc_result_t` error codes to typed C# exceptions.
-
 ```csharp
-try
-{
-    var ctx = NetcContext.Create(dict);
-    ctx.Compress(src, dst);
-}
-catch (NetcException ex)
-{
-    Console.WriteLine($"Error: {ex.ErrorCode} — {ex.Message}");
-}
+try { ctx.Compress(src, dst); }
+catch (NetcException ex) { Debug.LogError($"{ex.ErrorCode}: {ex.Message}"); }
 ```
 
-### `NetcResult` Enum
+### Enums
 
-| Value | Name | Description |
-|-------|------|-------------|
-| 0 | `Ok` | Success |
-| -1 | `ErrInvalidArg` | NULL pointer or invalid parameter |
-| -2 | `ErrBufferTooSmall` | Output buffer insufficient |
-| -3 | `ErrCorrupt` | Corrupted or truncated data |
-| -4 | `ErrModelMismatch` | Dict model_id != packet model_id |
-| -5 | `ErrNoMem` | Memory allocation failed |
-| -6 | `ErrDictRequired` | Operation requires a dictionary |
-| -7 | `ErrNotReady` | Context not initialized |
+**`NetcResult`**: `Ok(0)`, `ErrInvalidArg(-1)`, `ErrBufferTooSmall(-2)`, `ErrCorrupt(-3)`, `ErrModelMismatch(-4)`, `ErrNoMem(-5)`, `ErrDictRequired(-6)`, `ErrNotReady(-7)`
 
-### `NetcMode` Enum
+**`NetcMode`**: `Stateful(0)` (TCP), `Stateless(1)` (UDP)
 
-| Value | Name | Description |
-|-------|------|-------------|
-| 0 | `Stateful` | TCP mode — ring buffer accumulates history |
-| 1 | `Stateless` | UDP mode — each packet is independent |
+---
 
 ## File Structure
 
@@ -150,18 +301,18 @@ sdk/csharp/
 ├── Netc.Core/
 │   ├── Netc.Core.csproj
 │   ├── NetcNative.cs          # P/Invoke declarations (22 functions)
-│   ├── NetcResult.cs          # enum NetcResult : int
-│   ├── NetcMode.cs            # enum NetcMode
-│   ├── NetcException.cs       # Exception wrapping NetcResult
-│   ├── NetcStats.cs           # Public stats struct
-│   ├── NetcDict.cs            # IDisposable dict wrapper
-│   ├── NetcContext.cs         # IDisposable context wrapper
-│   └── NetcTrainer.cs         # Training helper
+│   ├── NetcResult.cs
+│   ├── NetcMode.cs
+│   ├── NetcException.cs
+│   ├── NetcStats.cs
+│   ├── NetcDict.cs
+│   ├── NetcContext.cs
+│   └── NetcTrainer.cs
 ├── tests/
 │   └── Netc.Core.Tests/
 │       ├── Netc.Core.Tests.csproj
 │       ├── GlobalUsings.cs
-│       ├── Helpers.cs          # Shared dict builder, sample data
+│       ├── Helpers.cs
 │       ├── ResultTests.cs
 │       ├── DictTests.cs
 │       ├── ContextTests.cs
