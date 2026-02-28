@@ -128,6 +128,7 @@ endif()
 # Shared library: netc_shared (for C# P/Invoke and dynamic linking)
 # =============================================================================
 add_library(netc_shared SHARED ${NETC_CORE_SOURCES})
+set_target_properties(netc_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 target_include_directories(netc_shared
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
