@@ -139,6 +139,19 @@ static uint32_t decomp_bucket_start(uint32_t b) {
  * a subsequent rle_decode pass reconstructs the original bytes.
  * ========================================================================= */
 
+/* Helper: select tANS table for decode — mirrors select_tans_table in netc_compress.c. */
+static const netc_tans_table_t *
+decomp_select_tbl(const netc_dict_t *dict, uint32_t bucket,
+                  uint8_t prev_byte, uint8_t pkt_flags)
+{
+    if (pkt_flags & NETC_PKT_FLAG_BIGRAM) {
+        uint32_t bclass = netc_bigram_class(prev_byte);
+        const netc_tans_table_t *tbl = &dict->bigram_tables[bucket][bclass];
+        if (tbl->valid) return tbl;
+    }
+    return &dict->tables[bucket];
+}
+
 static netc_result_t decode_tans(
     const netc_dict_t       *dict,
     const netc_pkt_header_t *hdr,
@@ -156,7 +169,7 @@ static netc_result_t decode_tans(
     int is_mreg = (hdr->flags & NETC_PKT_FLAG_MREG) != 0;
 
     if (is_mreg) {
-        /* --- Multi-region decode (v0.2) --- */
+        /* --- Multi-region decode (v0.2+) --- */
         if (payload_size < 1) return NETC_ERR_CORRUPT;
         uint8_t n_regions = payload[0];
         if (n_regions == 0 || n_regions > NETC_CTX_COUNT) return NETC_ERR_CORRUPT;
@@ -169,6 +182,10 @@ static netc_result_t decode_tans(
         size_t         bits_offset = 0;
 
         uint32_t first_bucket = netc_ctx_bucket(0);
+
+        /* prev_byte tracks the last decoded byte of the previous region,
+         * matching what the encoder used for bigram class selection. */
+        uint8_t region_prev_byte = 0x00u;
 
         for (uint32_t r = 0; r < n_regions; r++) {
             uint32_t state    = netc_read_u32_le(payload + 1u + r * 8u);
@@ -191,7 +208,9 @@ static netc_result_t decode_tans(
             if (bits_offset + bs_bytes > bits_avail)
                 return NETC_ERR_CORRUPT;
 
-            const netc_tans_table_t *tbl = &dict->tables[bucket];
+            const netc_tans_table_t *tbl = decomp_select_tbl(dict, bucket,
+                                                              region_prev_byte,
+                                                              hdr->flags);
             if (!tbl->valid) return NETC_ERR_DICT_INVALID;
 
             netc_bsr_t bsr;
@@ -202,6 +221,8 @@ static netc_result_t decode_tans(
                 return NETC_ERR_CORRUPT;
 
             bits_offset += bs_bytes;
+            /* Update prev_byte for next region: last decoded byte of this region */
+            region_prev_byte = ((uint8_t *)dst)[region_end - 1];
         }
 
         *dst_size = orig;
@@ -210,7 +231,8 @@ static netc_result_t decode_tans(
     } else {
         /* --- Legacy single-region decode (no MREG flag) --- */
         uint32_t bucket = netc_ctx_bucket(0);  /* single region always bucket 0 */
-        const netc_tans_table_t *tbl = &dict->tables[bucket];
+        /* prev_byte at position 0 is implicitly 0x00 (packet start), same as encoder */
+        const netc_tans_table_t *tbl = decomp_select_tbl(dict, bucket, 0x00u, hdr->flags);
         if (!tbl->valid) return NETC_ERR_DICT_INVALID;
 
         if (hdr->flags & NETC_PKT_FLAG_X2) {

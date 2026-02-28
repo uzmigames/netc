@@ -218,25 +218,30 @@ static size_t lz77_encode(const uint8_t *src, size_t src_size,
 }
 
 /* =========================================================================
- * Internal: attempt multi-region tANS compression (v0.2)
+ * Internal: select tANS table — unigram or bigram sub-table.
  *
- * Encodes each contiguous bucket region as an independent ANS stream.
- * Regions covering no bytes in the current packet are skipped.
- *
- * Wire format (after the 8-byte packet header):
- *   [1B]      n_regions  — number of encoded regions (1..NETC_CTX_COUNT)
- *   [n×8B]    descriptors — per region: {uint32_le state, uint32_le bs_bytes}
- *   [N B]     bitstreams  — concatenated region bitstreams (region 0 first)
- *
- * Returns 0 on success (sets *compressed_payload_size).
- * Returns -1 if any table is invalid, a symbol is missing, or output expands.
+ * When ctx_flags has NETC_CFG_FLAG_BIGRAM set, returns the bigram sub-table
+ * for bucket `bucket` and bigram class derived from `prev_byte`.
+ * Otherwise returns the unigram table for `bucket`.
  * ========================================================================= */
+static NETC_INLINE const netc_tans_table_t *
+select_tans_table(const netc_dict_t *dict, uint32_t bucket,
+                  uint8_t prev_byte, uint32_t ctx_flags)
+{
+    if (ctx_flags & NETC_CFG_FLAG_BIGRAM) {
+        uint32_t bclass = netc_bigram_class(prev_byte);
+        const netc_tans_table_t *tbl = &dict->bigram_tables[bucket][bclass];
+        if (tbl->valid) return tbl;
+    }
+    return &dict->tables[bucket];
+}
+
 /* =========================================================================
  * Internal: single-region tANS encode (legacy format: [4B state][bitstream])
  *
- * Encodes all src bytes using the single table for the bucket of byte 0.
- * This has only 4 bytes of overhead vs MREG's 1+n*8 overhead, making it
- * better for small packets where MREG header cost exceeds savings.
+ * Encodes all src bytes using the table for the bucket of byte 0.
+ * When NETC_CFG_FLAG_BIGRAM is set, selects the bigram sub-table using
+ * the implicit start-of-packet previous byte (0x00).
  *
  * Sets *used_mreg_flag = 0.
  * Returns 0 on success (sets *compressed_payload_size), -1 on failure.
@@ -249,17 +254,21 @@ static int try_tans_single_region(
     size_t             dst_payload_cap,
     size_t            *compressed_payload_size,
     int               *used_mreg_flag,
-    int               *used_x2_flag)
+    int               *used_x2_flag,
+    uint32_t           ctx_flags)
 {
     uint32_t bucket = netc_ctx_bucket(0);
-    const netc_tans_table_t *tbl = &dict->tables[bucket];
+    /* For single-region, prev_byte at position 0 is implicitly 0x00 (packet start) */
+    const netc_tans_table_t *tbl = select_tans_table(dict, bucket, 0x00u, ctx_flags);
     if (!tbl->valid) return -1;
 
     /* Use dual-interleaved (x2) encode for regions >= 8 bytes.
      * x2 exposes ILP (two independent ANS states) at the cost of 4 extra
      * header bytes (8B total vs 4B). Only worth it when bitstream savings
-     * exceed the extra header bytes — guaranteed for src_size >= 8. */
-    if (src_size >= 8 && dst_payload_cap >= 8) {
+     * exceed the extra header bytes — guaranteed for src_size >= 8.
+     * Note: x2 is disabled for bigram (bigram adds NETC_PKT_FLAG_BIGRAM
+     * and uses single-state for simpler decoder logic). */
+    if (!(ctx_flags & NETC_CFG_FLAG_BIGRAM) && src_size >= 8 && dst_payload_cap >= 8) {
         netc_bsw_t bsw;
         netc_bsw_init(&bsw, dst + 8, dst_payload_cap - 8);
 
@@ -317,7 +326,8 @@ static int try_tans_compress(
     size_t             dst_payload_cap,
     size_t            *compressed_payload_size,
     int               *used_mreg_flag,  /* out: 1 if MREG format was used */
-    int               *used_x2_flag)    /* out: 1 if dual-state x2 encode was used */
+    int               *used_x2_flag,   /* out: 1 if dual-state x2 encode was used */
+    uint32_t           ctx_flags)       /* NETC_CFG_FLAG_* bitmask */
 {
     if (src_size == 0) return -1;
 
@@ -331,10 +341,10 @@ static int try_tans_compress(
     if (n_regions == 1) {
         return try_tans_single_region(dict, src, src_size, dst, dst_payload_cap,
                                       compressed_payload_size, used_mreg_flag,
-                                      used_x2_flag);
+                                      used_x2_flag, ctx_flags);
     }
 
-    /* Validate all per-bucket tables (Laplace smoothing → all symbols freq≥1) */
+    /* Validate all per-bucket tables */
     for (uint32_t b = first_bucket; b <= last_bucket; b++) {
         if (!dict->tables[b].valid) return -1;
     }
@@ -343,21 +353,22 @@ static int try_tans_compress(
     size_t hdr_bytes = 1u + (size_t)n_regions * 8u;
     if (dst_payload_cap < hdr_bytes) return -1;
 
-    /* If MREG header overhead is too large relative to packet size, the per-region
-     * header bytes (1+n*8) eat into compression savings.  Use single-region instead:
-     * - Always when header would exceed the packet (nothing left for bitstreams)
-     * - When header is > 25% of src_size (overhead dominates for small packets) */
+    /* If MREG header overhead is too large relative to packet size, use single-region */
     if (hdr_bytes >= src_size || hdr_bytes * 4u >= src_size) {
         return try_tans_single_region(dict, src, src_size, dst, dst_payload_cap,
                                       compressed_payload_size, used_mreg_flag,
-                                      used_x2_flag);
+                                      used_x2_flag, ctx_flags);
     }
 
     uint8_t *bits_base = dst + hdr_bytes;
     size_t   bits_cap  = dst_payload_cap - hdr_bytes;
     size_t   bits_used = 0;
 
-    /* Encode each region into the bitstream buffer (in order) */
+    /* Encode each region into the bitstream buffer (in order).
+     * For bigram encoding, each region's table is selected using the last byte
+     * of the preceding region (or 0x00 for the first region). */
+    uint8_t region_prev_byte = 0x00u; /* implicit start-of-packet */
+
     for (uint32_t r = 0; r < n_regions; r++) {
         uint32_t bucket      = first_bucket + r;
         uint32_t rstart      = bucket_start_offset(bucket);
@@ -374,11 +385,15 @@ static int try_tans_compress(
             continue;
         }
 
+        const netc_tans_table_t *tbl = select_tans_table(dict, bucket,
+                                                          region_prev_byte,
+                                                          ctx_flags);
+
         netc_bsw_t bsw;
         netc_bsw_init(&bsw, bits_base + bits_used, bits_cap - bits_used);
 
         uint32_t final_state = netc_tans_encode(
-            &dict->tables[bucket],
+            tbl,
             src + region_start, region_len,
             &bsw, NETC_TANS_TABLE_SIZE);
 
@@ -391,6 +406,9 @@ static int try_tans_compress(
         netc_write_u32_le(dst + 1u + r * 8u,      final_state);
         netc_write_u32_le(dst + 1u + r * 8u + 4u, (uint32_t)region_bs);
         bits_used += region_bs;
+
+        /* Update prev_byte for next region (last byte of this region) */
+        region_prev_byte = src[region_end - 1];
     }
 
     dst[0] = (uint8_t)n_regions;
@@ -466,7 +484,8 @@ netc_result_t netc_compress(
 
         if (try_tans_compress(dict, compress_src, src_size,
                               payload, payload_cap,
-                              &compressed_payload, &used_mreg, &used_x2) == 0 &&
+                              &compressed_payload, &used_mreg, &used_x2,
+                              ctx->flags) == 0 &&
             compressed_payload < src_size) {
 
             /* tANS compressed — check if LZ77 would do better.
@@ -583,8 +602,9 @@ case_b_skip:;
             }
 
             /* tANS wins */
-            uint8_t extra_flags = (used_mreg ? NETC_PKT_FLAG_MREG : 0)
-                                | (used_x2   ? NETC_PKT_FLAG_X2   : 0);
+            uint8_t extra_flags = (used_mreg ? NETC_PKT_FLAG_MREG   : 0)
+                                | (used_x2   ? NETC_PKT_FLAG_X2     : 0)
+                                | ((ctx->flags & NETC_CFG_FLAG_BIGRAM) ? NETC_PKT_FLAG_BIGRAM : 0);
             netc_pkt_header_t hdr;
             hdr.original_size   = (uint16_t)src_size;
             hdr.compressed_size = (uint16_t)compressed_payload;
@@ -688,7 +708,8 @@ netc_result_t netc_compress_stateless(
 
         int tans_ok = (try_tans_compress(dict, (const uint8_t *)src, src_size,
                                          payload, payload_cap,
-                                         &compressed_payload, &used_mreg, &used_x2) == 0
+                                         &compressed_payload, &used_mreg, &used_x2,
+                                         0U /* stateless: no bigram */) == 0
                        && compressed_payload < src_size);
 
         if (tans_ok) {

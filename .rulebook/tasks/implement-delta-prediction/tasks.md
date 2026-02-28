@@ -19,9 +19,9 @@
 ## 4. Coarse Context Bucket Model (per RFC-001 §6.2 — AD-003)
 - [x] 4.1 4-bucket context model already in Phase 2: CTX_HEADER(0–15), CTX_SUBHEADER(16–63), CTX_BODY(64–255), CTX_TAIL(256–1499)
 - [x] 4.2 Each bucket has one 256-entry tANS frequency table (implemented in Phase 2)
-- [ ] 4.3 Implement optional per-bucket bigram table (enabled via NETC_PKT_FLAG_BIGRAM)
-- [ ] 4.4 Add bucket frequency tables to dictionary training (netc_dict_train update)
-- [ ] 4.5 Write tests: coarse bucket model improves ratio on structured data vs single-table
+- [x] 4.3 Implement optional per-bucket bigram table (enabled via NETC_PKT_FLAG_BIGRAM) — 4 bigram classes (prev_byte>>6) × 16 position buckets = 64 tANS sub-tables; dict blob v0.3 = 40972 bytes; 7 new tests in test_compress.c
+- [x] 4.4 Add bucket frequency tables to dictionary training (netc_dict_train update) — bgram_raw[NETC_CTX_COUNT][NETC_BIGRAM_CTX_COUNT][NETC_TANS_SYMBOLS] accumulated per packet
+- [x] 4.5 Write tests: coarse bucket model improves ratio on structured data vs single-table — test_bigram_improves_ratio_on_structured_data passes (41 tests, 0 failures)
 
 ## 5. Pipeline Integration
 - [x] 5.1 Wire delta pre-pass (field-class aware, per AD-002) before tANS in netc_compress

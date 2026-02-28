@@ -22,7 +22,7 @@
 #define NETC_DEFAULT_RING_SIZE  (64u * 1024u)  /* 64 KB */
 #define NETC_DEFAULT_ARENA_SIZE (NETC_MAX_PACKET_SIZE * 2u + 64u)  /* ~131 KB */
 #define NETC_DICT_MAGIC         0x4E455443U    /* "NETC" */
-#define NETC_DICT_VERSION       2U             /* v0.2: 16 buckets, ctx_count field */
+#define NETC_DICT_VERSION       3U             /* v0.3: bigram sub-tables (4 classes × 16 buckets) */
 
 /* =========================================================================
  * Dictionary internals
@@ -37,13 +37,19 @@
  */
 struct netc_dict {
     uint32_t magic;      /* NETC_DICT_MAGIC — sanity check */
-    uint8_t  version;    /* NETC_DICT_VERSION (= 2) */
+    uint8_t  version;    /* NETC_DICT_VERSION (= 3) */
     uint8_t  model_id;   /* 1–254; 0 = passthrough only; 255 = reserved */
     uint8_t  ctx_count;  /* Number of context buckets stored (= NETC_CTX_COUNT) */
     uint8_t  _pad;
 
-    /* Per-context-bucket tANS tables — 16 tables in v0.2 */
+    /* Per-context-bucket tANS tables — 16 tables in v0.2+ */
     netc_tans_table_t tables[NETC_CTX_COUNT];
+
+    /* Per-bucket bigram sub-tables (v0.3+, NETC_BIGRAM_CTX_COUNT classes per bucket).
+     * bigram_tables[bucket][class] is the tANS table used when the previous byte
+     * maps to bigram class `class` (via netc_bigram_class(prev_byte)).
+     * Only populated when trained with NETC_CFG_FLAG_BIGRAM. */
+    netc_tans_table_t bigram_tables[NETC_CTX_COUNT][NETC_BIGRAM_CTX_COUNT];
 
     uint32_t checksum;   /* CRC32 of all preceding fields */
 };

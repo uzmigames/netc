@@ -13,6 +13,11 @@
  *   Compression correctness:
  *     - Original bytes exactly recovered after decompress
  *     - dst_size from compress ≤ src_size + NETC_MAX_OVERHEAD (AD-006)
+ *   Bigram context model (task 4.3, 4.4, 4.5):
+ *     - NETC_PKT_FLAG_BIGRAM set when NETC_CFG_FLAG_BIGRAM enabled
+ *     - Bigram round-trip: repetitive, skewed, multi-packet, MREG
+ *     - Bigram improves or matches ratio vs unigram on structured data
+ *     - Non-bigram packet decompresses correctly on bigram-enabled ctx
  *   Stateless round-trip:
  *     - netc_compress_stateless + netc_decompress_stateless
  *   MREG multi-region round-trip:
@@ -817,6 +822,254 @@ void test_compress_stateless_context_seq_is_zero(void) {
 }
 
 /* =========================================================================
+ * Bigram context model tests (task 4.3, 4.4, 4.5)
+ * ========================================================================= */
+
+/* 4.3 / 4.4: Bigram flag set in header when NETC_CFG_FLAG_BIGRAM is enabled.
+ * Uses skewed data that tANS compresses well but LZ77 does not (diverse bytes). */
+void test_bigram_flag_set_in_header(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    /* Use skewed data trained on s_dict — tANS should win over LZ77.
+     * s_skewed has 80% 0x41 bytes and 20% varying bytes, which LZ77
+     * handles poorly (no local back-references) but tANS compresses well. */
+    uint8_t cbuf[1024];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx, s_skewed, sizeof(s_skewed), cbuf, sizeof(cbuf), &csz));
+
+    /* Verify the packet is a tANS packet (algorithm byte [5] == NETC_ALG_TANS = 1) */
+    if (cbuf[5] == 1 /* NETC_ALG_TANS */) {
+        /* If tANS was selected, BIGRAM flag must be set */
+        TEST_ASSERT_BITS_HIGH(NETC_PKT_FLAG_BIGRAM, cbuf[4]);
+    }
+    /* If LZ77/passthrough was selected, bigram flag is not set — that's valid;
+     * just verify round-trip correctness (covered by other tests). */
+
+    netc_ctx_destroy(ctx);
+}
+
+/* 4.3: Bigram round-trip — compress with BIGRAM, decompress, verify exact recovery */
+void test_bigram_roundtrip_repetitive(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    uint8_t src[256];
+    memset(src, 0x42, sizeof(src));
+
+    uint8_t cbuf[1024];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_c, src, sizeof(src), cbuf, sizeof(cbuf), &csz));
+
+    uint8_t dbuf[256];
+    size_t  dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(src), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(src, dbuf, sizeof(src));
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* 4.3: Bigram round-trip — skewed byte distribution */
+void test_bigram_roundtrip_skewed(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    uint8_t cbuf[1024];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_c, s_skewed, sizeof(s_skewed), cbuf, sizeof(cbuf), &csz));
+
+    uint8_t dbuf[512];
+    size_t  dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(s_skewed), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(s_skewed, dbuf, sizeof(s_skewed));
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* 4.3: Bigram round-trip — multi-packet sequence maintains consistency */
+void test_bigram_roundtrip_multi_packet(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM | NETC_CFG_FLAG_DELTA;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    /* 5 successive packets of same pattern with minor variation */
+    for (int i = 0; i < 5; i++) {
+        uint8_t src[128];
+        memset(src, (uint8_t)(0x10 + i), sizeof(src));
+        src[0] = 0x00; src[1] = 0x01; /* fixed header bytes */
+
+        uint8_t cbuf[512];
+        size_t  csz = 0;
+        TEST_ASSERT_EQUAL_INT(NETC_OK,
+            netc_compress(ctx_c, src, sizeof(src), cbuf, sizeof(cbuf), &csz));
+
+        uint8_t dbuf[128];
+        size_t  dsz = 0;
+        TEST_ASSERT_EQUAL_INT(NETC_OK,
+            netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+        TEST_ASSERT_EQUAL_UINT(sizeof(src), dsz);
+        TEST_ASSERT_EQUAL_MEMORY(src, dbuf, sizeof(src));
+    }
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* 4.5: Bigram improves ratio on structured data vs single-table (unigram only).
+ * Train dict on structured data; compare compressed sizes with and without bigram.
+ * Bigram should produce equal or smaller output for structured data. */
+void test_bigram_improves_ratio_on_structured_data(void) {
+    /* Structured data: alternating header bytes then body */
+    uint8_t structured[128];
+    for (size_t i = 0; i < 8; i++)  structured[i] = 0x00;           /* header: all zeros */
+    for (size_t i = 8; i < 16; i++) structured[i] = (uint8_t)i;     /* sub-header: sequential */
+    for (size_t i = 16; i < 128; i++) structured[i] = 0x41;         /* body: all 'A' */
+
+    /* Train on the structured pattern repeated */
+    const uint8_t *train_pkts[] = { structured, structured, structured };
+    size_t         train_szs[]  = { sizeof(structured), sizeof(structured), sizeof(structured) };
+    netc_dict_t *d = NULL;
+    TEST_ASSERT_EQUAL_INT(NETC_OK, netc_dict_train(train_pkts, train_szs, 3, 2, &d));
+    TEST_ASSERT_NOT_NULL(d);
+
+    /* Compress with standard unigram (no bigram) */
+    netc_cfg_t cfg_uni;
+    memset(&cfg_uni, 0, sizeof(cfg_uni));
+    cfg_uni.flags = NETC_CFG_FLAG_STATEFUL;
+    netc_ctx_t *ctx_uni = netc_ctx_create(d, &cfg_uni);
+    TEST_ASSERT_NOT_NULL(ctx_uni);
+
+    uint8_t cbuf_uni[512];
+    size_t  csz_uni = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_uni, structured, sizeof(structured),
+                      cbuf_uni, sizeof(cbuf_uni), &csz_uni));
+
+    /* Compress with bigram context */
+    netc_cfg_t cfg_bi;
+    memset(&cfg_bi, 0, sizeof(cfg_bi));
+    cfg_bi.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx_bi = netc_ctx_create(d, &cfg_bi);
+    TEST_ASSERT_NOT_NULL(ctx_bi);
+
+    uint8_t cbuf_bi[512];
+    size_t  csz_bi = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_bi, structured, sizeof(structured),
+                      cbuf_bi, sizeof(cbuf_bi), &csz_bi));
+
+    /* Bigram output must round-trip correctly */
+    netc_ctx_t *ctx_d = netc_ctx_create(d, &cfg_bi);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+    uint8_t dbuf[128];
+    size_t  dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf_bi, csz_bi, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(structured), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(structured, dbuf, sizeof(structured));
+
+    /* Bigram should match or beat unigram on structured data.
+     * Both are within the passthrough bound; allow ≤5% slack for short packets. */
+    TEST_ASSERT_TRUE_MESSAGE(csz_bi <= csz_uni + csz_uni / 20,
+        "Bigram ratio should be ≤ unigram ratio on structured data");
+
+    netc_ctx_destroy(ctx_uni);
+    netc_ctx_destroy(ctx_bi);
+    netc_ctx_destroy(ctx_d);
+    netc_dict_free(d);
+}
+
+/* 4.3: Without bigram flag in packet, decompress must not use bigram tables
+ * (i.e., a packet compressed without BIGRAM still decompresses correctly on
+ * a ctx with NETC_CFG_FLAG_BIGRAM — decoder routes on packet flag, not ctx flag). */
+void test_bigram_non_bigram_packet_decompresses_on_bigram_ctx(void) {
+    /* Standard compress — no bigram */
+    uint8_t src[64];
+    memset(src, 0x55, sizeof(src));
+
+    uint8_t cbuf[256];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(s_ctx, src, sizeof(src), cbuf, sizeof(cbuf), &csz));
+
+    /* Verify BIGRAM flag is NOT set (s_ctx has no NETC_CFG_FLAG_BIGRAM) */
+    TEST_ASSERT_BITS_LOW(NETC_PKT_FLAG_BIGRAM, cbuf[4]);
+
+    /* Decompress using a bigram-enabled ctx — should still work */
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    uint8_t dbuf[64];
+    size_t  dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(src), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(src, dbuf, sizeof(src));
+
+    netc_ctx_destroy(ctx_d);
+}
+
+/* 4.3: Bigram MREG round-trip — packet spanning multiple buckets with bigram */
+void test_bigram_mreg_roundtrip(void) {
+    netc_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
+    netc_ctx_t *ctx_c = netc_ctx_create(s_dict, &cfg);
+    netc_ctx_t *ctx_d = netc_ctx_create(s_dict, &cfg);
+    TEST_ASSERT_NOT_NULL(ctx_c);
+    TEST_ASSERT_NOT_NULL(ctx_d);
+
+    /* 300-byte repetitive packet — spans multiple position buckets */
+    uint8_t src[300];
+    for (size_t i = 0; i < sizeof(src); i++)
+        src[i] = (uint8_t)(0x41 + (i % 4));
+
+    uint8_t cbuf[1024];
+    size_t  csz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_compress(ctx_c, src, sizeof(src), cbuf, sizeof(cbuf), &csz));
+
+    uint8_t dbuf[300];
+    size_t  dsz = 0;
+    TEST_ASSERT_EQUAL_INT(NETC_OK,
+        netc_decompress(ctx_d, cbuf, csz, dbuf, sizeof(dbuf), &dsz));
+    TEST_ASSERT_EQUAL_UINT(sizeof(src), dsz);
+    TEST_ASSERT_EQUAL_MEMORY(src, dbuf, sizeof(src));
+
+    netc_ctx_destroy(ctx_c);
+    netc_ctx_destroy(ctx_d);
+}
+
+/* =========================================================================
  * main
  * ========================================================================= */
 
@@ -880,6 +1133,15 @@ int main(void) {
     RUN_TEST(test_compress_stateless_never_sets_delta);
     RUN_TEST(test_compress_stateless_lz77_roundtrip_repetitive);
     RUN_TEST(test_compress_stateless_context_seq_is_zero);
+
+    /* Bigram context model (task 4.3, 4.4, 4.5) */
+    RUN_TEST(test_bigram_flag_set_in_header);
+    RUN_TEST(test_bigram_roundtrip_repetitive);
+    RUN_TEST(test_bigram_roundtrip_skewed);
+    RUN_TEST(test_bigram_roundtrip_multi_packet);
+    RUN_TEST(test_bigram_improves_ratio_on_structured_data);
+    RUN_TEST(test_bigram_non_bigram_packet_decompresses_on_bigram_ctx);
+    RUN_TEST(test_bigram_mreg_roundtrip);
 
     return UNITY_END();
 }

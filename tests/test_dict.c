@@ -14,7 +14,7 @@
  *     - Frequency tables sum to TABLE_SIZE after training
  *   Serialization (save):
  *     - NULL args → NETC_ERR_INVALID_ARG
- *     - Blob size equals expected DICT_BLOB_SIZE (8204 bytes, v0.2 with 16 buckets)
+ *     - Blob size equals expected DICT_BLOB_SIZE (40972 bytes, v0.3 with 16 buckets + 4 bigram classes)
  *     - Magic and model_id readable from blob
  *   Deserialization (load):
  *     - NULL args → NETC_ERR_INVALID_ARG
@@ -34,12 +34,14 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-/* Match the blob size from netc_dict.c (v0.2: 16 buckets) */
-#define NETC_CTX_COUNT      16U
-#define NETC_TANS_SYMBOLS   256U
-#define NETC_TANS_TABLE_SIZE 4096U
-/* 8 (header: magic+version+model_id+ctx_count+pad) + 16*256*2 (freq) + 4 (crc) = 8204 */
-#define EXPECTED_BLOB_SIZE  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
+/* Match the blob size from netc_dict.c (v0.3: 16 buckets + 4 bigram classes) */
+#define NETC_CTX_COUNT        16U
+#define NETC_BIGRAM_CTX_COUNT  4U
+#define NETC_TANS_SYMBOLS     256U
+#define NETC_TANS_TABLE_SIZE  4096U
+/* 8 (header) + 16*256*2 (unigram) + 16*4*256*2 (bigram) + 4 (crc) = 40972 */
+#define EXPECTED_BLOB_SIZE  (8U + NETC_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + \
+                             NETC_CTX_COUNT * NETC_BIGRAM_CTX_COUNT * NETC_TANS_SYMBOLS * 2U + 4U)
 
 /* =========================================================================
  * Sample training data — representative byte sequences

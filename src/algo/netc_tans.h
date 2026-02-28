@@ -44,6 +44,21 @@
  * reducing cross-region entropy mixing (e.g. zero-padding vs float fields). */
 #define NETC_CTX_COUNT      16U
 
+/* Bigram context class count (v0.3+).
+ * Each position bucket has NETC_BIGRAM_CTX_COUNT sub-tables, selected by the
+ * two most-significant bits of the previous byte (prev_byte >> 6):
+ *   class 0: prev byte in [0x00..0x3F]  — null/small/ASCII-low
+ *   class 1: prev byte in [0x40..0x7F]  — ASCII-high/punctuation
+ *   class 2: prev byte in [0x80..0xBF]  — high bytes / UTF-8 continuations
+ *   class 3: prev byte in [0xC0..0xFF]  — leading bytes / protocol markers
+ * Controlled by NETC_CFG_FLAG_BIGRAM / NETC_PKT_FLAG_BIGRAM. */
+#define NETC_BIGRAM_CTX_COUNT 4U
+
+/* Map a previous byte value to its bigram context class (0..3). */
+static NETC_INLINE uint32_t netc_bigram_class(uint8_t prev_byte) {
+    return (uint32_t)(prev_byte >> 6);
+}
+
 /* Backward-compat aliases for the four coarse v0.1 names.
  * These map to the new bucket indices that cover the same offset ranges. */
 #define NETC_CTX_HEADER     0U   /* offsets [0..7]   — first 8 bytes */
