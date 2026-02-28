@@ -1,9 +1,9 @@
 ## 1. Core C++ Wrappers
-- [ ] 1.1 Implement FNetcDict (RAII, TSharedRef-compatible, LoadFromFile, LoadFromBytes)
-- [ ] 1.2 Implement FNetcContext (RAII, TCP and UDP modes, Compress/Decompress TArrayView API)
-- [ ] 1.3 Implement FNetcTrainer (train from TArray<TArray<uint8>>, save/load dict)
-- [ ] 1.4 Implement FNetcResult (error propagation compatible with UE_LOG and ensureMsgf)
-- [ ] 1.5 Write unit tests (standalone C++17, no UE5 dependency) for all wrappers
+- [x] 1.1 Implement FNetcDict (RAII, TSharedRef-compatible, LoadFromFile, LoadFromBytes)
+- [x] 1.2 Implement FNetcContext (RAII, TCP and UDP modes, Compress/Decompress TArrayView API)
+- [x] 1.3 Implement FNetcTrainer (train from TArray<TArray<uint8>>, save/load dict)
+- [x] 1.4 Implement FNetcResult (error propagation compatible with UE_LOG and ensureMsgf)
+- [x] 1.5 Write unit tests (standalone C++17, no UE5 dependency) for all wrappers
 
 ## 2. UE5 Plugin
 - [ ] 2.1 Write NetcPlugin.uplugin descriptor (ThirdParty module declaration)

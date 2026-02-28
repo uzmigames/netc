@@ -1,14 +1,14 @@
 ## 1. P/Invoke Layer
-- [ ] 1.1 Write NetcNative.cs (DllImport for all public netc functions, CallingConvention.Cdecl)
+- [x] 1.1 Write NetcNative.cs (DllImport for all public netc functions, CallingConvention.Cdecl)
 - [ ] 1.2 Implement platform-conditional DLL loading (Win64 .dll, Linux .so, macOS .dylib, Android .so, iOS static)
-- [ ] 1.3 Write unit tests for P/Invoke declarations (xUnit, dotnet test)
+- [x] 1.3 Write unit tests for P/Invoke declarations (xUnit, dotnet test)
 
 ## 2. Core C# Wrappers
-- [ ] 2.1 Implement NetcDict (IDisposable, LoadFromBytes(ReadOnlySpan<byte>), LoadFromFile, Train)
-- [ ] 2.2 Implement NetcContext (IDisposable, TCP/UDP mode, Compress/Decompress Span<byte> API)
-- [ ] 2.3 Implement NetcTrainer (Train from IEnumerable<ReadOnlyMemory<byte>>, SaveToBytes)
-- [ ] 2.4 Implement NetcException (maps netc_result_t error codes to typed exceptions)
-- [ ] 2.5 Write unit tests: round-trip all workloads (WL-001..WL-008 equivalent), thread safety
+- [x] 2.1 Implement NetcDict (IDisposable, LoadFromBytes(ReadOnlySpan<byte>), LoadFromFile, Train)
+- [x] 2.2 Implement NetcContext (IDisposable, TCP/UDP mode, Compress/Decompress Span<byte> API)
+- [x] 2.3 Implement NetcTrainer (Train from IEnumerable<ReadOnlyMemory<byte>>, SaveToBytes)
+- [x] 2.4 Implement NetcException (maps netc_result_t error codes to typed exceptions)
+- [x] 2.5 Write unit tests: round-trip all workloads (WL-001..WL-008 equivalent), thread safety
 
 ## 3. Unity Adapter
 - [ ] 3.1 Implement NetcMirrorTransport (extends Mirror Transport, wraps NetcContext per connection)
