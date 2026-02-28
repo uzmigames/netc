@@ -215,7 +215,7 @@ if(NETC_BUILD_CPP_SDK)
         set(UNITY_INC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vendor/unity")
 
         add_executable(test_cpp_sdk
-            tests/test_cpp_sdk.cpp
+            sdk/cpp/tests/test_cpp_sdk.cpp
             ${UNITY_SRC_PATH}
         )
         target_include_directories(test_cpp_sdk PRIVATE
