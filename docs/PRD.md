@@ -76,9 +76,9 @@ The absence of an open-source Oodle-grade alternative is the core problem netc s
 | G-14 | UDP stateless per-packet compression |
 | G-15 | Thread-safe context model (one context per thread) |
 | G-16 | Dictionary training from packet capture files (pcap) |
-| G-17 | **Native C++ SDK** with RAII wrappers for Unreal Engine 5 integration |
-| G-18 | **Native C# SDK** with Span-based, GC-pressure-free API for Unity |
-| G-19 | **GDExtension SDK** for Godot 4 with MultiplayerPeer integration (C++) |
+| G-17 | **Native C++ SDK** with RAII wrappers (standalone C++17) — **Done** (47 tests) |
+| G-18 | **Native C# SDK** with Span-based, GC-pressure-free API (.NET 9) — **Done** (56 tests) |
+| G-19 | **GDExtension SDK** for Godot 4 (C++) — Planned |
 
 ### 3.3 Non-Goals (Out of Scope)
 

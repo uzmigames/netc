@@ -265,6 +265,66 @@ Context memory increases from ~330 KB (default) to ~1 MB (adaptive).
 
 ---
 
+## SDK Wrappers
+
+### C++ SDK (C++17)
+
+RAII, move-only wrappers in `namespace netc`. Header-only includes via `<netc.hpp>`.
+
+```cpp
+#include <netc.hpp>
+
+// Train a dictionary
+netc::Trainer trainer;
+for (auto& pkt : captured_packets)
+    trainer.AddPacket(pkt.data(), pkt.size());
+
+netc::Dict dict;
+netc::Result r = trainer.Train(1, dict);
+
+// Compress (TCP stateful)
+netc::Context ctx(dict, netc::Mode::TCP, 5,
+    NETC_CFG_FLAG_DELTA | NETC_CFG_FLAG_COMPACT_HDR);
+
+std::vector<uint8_t> compressed;
+ctx.Compress(packet.data(), packet.size(), compressed);
+
+// Decompress
+std::vector<uint8_t> recovered;
+ctx.Decompress(compressed.data(), compressed.size(), recovered);
+```
+
+See [sdk/cpp/README.md](sdk/cpp/README.md) for full API reference.
+
+### C# SDK (.NET 9)
+
+`IDisposable` wrappers with zero-GC `Span<byte>` hot path. P/Invoke into `netc.dll`.
+
+```csharp
+using Netc;
+
+// Train a dictionary
+using var trainer = new NetcTrainer();
+foreach (var pkt in capturedPackets)
+    trainer.AddPacket(pkt);
+using var dict = trainer.Train(modelId: 1);
+
+// Compress (TCP stateful)
+using var ctx = NetcContext.Create(dict, NetcMode.Stateful, level: 5,
+    extraFlags: 0x08 | 0x10); // DELTA | COMPACT_HDR
+
+byte[] dst = new byte[NetcContext.MaxCompressedSize(src.Length)];
+int written = ctx.Compress(src, dst);
+
+// Decompress
+byte[] recovered = new byte[65535];
+int recoveredLen = ctx.Decompress(dst.AsSpan(0, written), recovered);
+```
+
+See [sdk/csharp/README.md](sdk/csharp/README.md) for full API reference.
+
+---
+
 ## Algorithm Pipeline
 
 ```
@@ -340,6 +400,14 @@ netc/
 |   +-- bench_corpus.c          # Workload generators
 |   +-- bench_runner.c          # Benchmark runner
 |   +-- bench_reporter.c        # Output formatting (table/CSV/JSON)
++-- sdk/
+|   +-- cpp/                    # C++17 SDK (RAII wrappers, 47 tests)
+|   |   +-- include/netc/       # Public headers (Dict, Context, Trainer, Result)
+|   |   +-- src/                # Implementation
+|   |   +-- tests/              # Unity C tests for C++ SDK
+|   +-- csharp/                 # C# SDK (.NET 9, P/Invoke, 56 tests)
+|       +-- Netc.Core/          # Core library (NetcDict, NetcContext, NetcTrainer)
+|       +-- tests/              # xUnit test project
 +-- tests/                      # Unit tests + fuzz targets
 +-- docs/
 |   +-- PRD.md                  # Product Requirements Document
@@ -356,6 +424,8 @@ netc/
 - [RFC-002 — Benchmark Requirements](docs/rfc/RFC-002-benchmark-performance-requirements.md) — Targets, methodology, CI gates, workload definitions
 - [PRD](docs/PRD.md) — Product requirements, phases, success metrics
 - [Algorithm Decisions](docs/design/algorithm-decisions.md) — Design decision log
+- [C++ SDK](sdk/cpp/README.md) — C++17 RAII wrappers (Dict, Context, Trainer)
+- [C# SDK](sdk/csharp/README.md) — .NET 9 P/Invoke wrappers (NetcDict, NetcContext, NetcTrainer)
 
 ---
 
@@ -376,8 +446,8 @@ netc/
 | Adaptive cross-packet learning (tANS + LZP + order-2 delta) | Done |
 | ARM NEON SIMD | Planned |
 | Profile-Guided Optimization (PGO) | Evaluated (+2-4% Clang, inconsistent GCC) |
-| C++ SDK (Unreal Engine 5) | Planned |
-| C# SDK (Unity) | Planned |
+| C++ SDK (standalone C++17) | Done |
+| C# SDK (.NET 9 / Unity) | Done (core wrappers + 56 tests) |
 | GDExtension (Godot 4, C++) | Planned |
 | v0.1.0 release tag | Pending |
 

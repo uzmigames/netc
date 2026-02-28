@@ -24,6 +24,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`netc_ctx_simd_level(ctx)`** — new public API function returning the actual runtime-detected SIMD level (1=generic, 2=sse42, 3=avx2, 4=neon). Independent of `cfg.simd_level` (0 = auto-detect); the returned value is always resolved. Returns 0 for `NULL`. Declared in `netc.h`, implemented in `src/core/netc_ctx.c`.
 - **`netc_simd_level_name(level)`** — new `static inline` helper in `src/simd/netc_simd.h` mapping a `uint8_t` SIMD level to a human-readable C string (`"generic"`, `"sse42"`, `"avx2"`, `"neon"`). Used by bench output and available to embedders.
 
+- **C++ SDK** (`sdk/cpp/`) — standalone C++17 RAII wrappers for the netc C API:
+  - `netc::Dict` — move-only dictionary wrapper with `LoadFromBytes`/`LoadFromFile`/`SaveToBytes`/`SaveToFile`.
+  - `netc::Context` — move-only compression context with `Compress`/`Decompress`/`CompressStateless`/`DecompressStateless` (`std::vector<uint8_t>` API).
+  - `netc::Trainer` — corpus management with `AddPacket`/`Train`/`Reset`.
+  - `netc::Result` enum + `ResultToString` mapping all `netc_result_t` error codes.
+  - 47 unit tests (Unity C framework). CMake integration via `NETC_BUILD_CPP_SDK`.
+
+- **C# SDK** (`sdk/csharp/`) — .NET 9 P/Invoke wrappers for the netc C API:
+  - `NetcDict` — `IDisposable` dictionary wrapper with `Load(ReadOnlySpan<byte>)`/`Save()`/`ModelId`.
+  - `NetcContext` — `IDisposable` compression context with zero-GC `Compress(ReadOnlySpan<byte>, Span<byte>)` hot path. Stateful and stateless modes.
+  - `NetcTrainer` — corpus management with `AddPacket(ReadOnlySpan<byte>)`/`Train(byte modelId)`.
+  - `NetcException` — maps `netc_result_t` error codes to typed C# exceptions.
+  - `NetcNative` — P/Invoke declarations for all 22 public C functions with `LayoutKind.Explicit` struct marshaling.
+  - 56 xUnit tests (roundtrip, stateless, error paths, disposal, trainer).
+
+- **Shared library DLL export fix** — added `WINDOWS_EXPORT_ALL_SYMBOLS ON` to the `netc_shared` CMake target, enabling MSVC builds to export all C functions for P/Invoke interop without `__declspec(dllexport)` annotations.
+
 - **Compress throughput optimizations** — `optimize-compress-throughput` task, Phase 1+2+3:
   - **Phase 1 — SKIP_SR optimization** (`NETC_INTERNAL_SKIP_SR`): When input bytes are pre-filtered (delta residuals or LZP XOR output), PCTX (per-position tables) always dominates single-region tables. Skipping the single-region trial saves 4-10 encode passes per packet. Enables `NETC_CFG_FLAG_DELTA` and LZP paths to skip 8-16 redundant trial encodes. **Result: 1.35-1.9× throughput gain, 0% ratio regression.**
   - **Phase 1 — Bucket LUT** (`netc_tans.h`): Replaced 16-branch `netc_ctx_bucket()` ladder with a 256-byte lookup table. Eliminates ~16 branch misses per multi-bucket packet in PCTX encode loop.
