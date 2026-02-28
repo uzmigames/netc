@@ -26,6 +26,11 @@
 #define NETC_DICT_VERSION       5U             /* v0.5: 8-class trained bigram quantization */
 #define NETC_DICT_VERSION_V4    4U             /* v0.4: LZP hash-prediction table (backward compat) */
 
+/* Adaptive mode: rebuild interval and blending parameters */
+#define NETC_ADAPTIVE_INTERVAL   128U   /* Rebuild tables every N packets */
+#define NETC_ADAPTIVE_ALPHA_NUM  3U     /* Blend ratio: alpha = 3/4 (accumulated) */
+#define NETC_ADAPTIVE_ALPHA_DEN  4U     /* Blend ratio: (1-alpha) = 1/4 (dict baseline) */
+
 /* =========================================================================
  * Dictionary internals
  * ========================================================================= */
@@ -111,6 +116,12 @@ struct netc_ctx {
 
     /* --- Statistics (only valid if NETC_CFG_FLAG_STATS set) --- */
     netc_stats_t       stats;
+
+    /* --- Adaptive mode state (Phase 1: frequency tracking + table rebuild) --- */
+    uint32_t          *adapt_freq;       /* [NETC_CTX_COUNT][256] frequency accumulators (NULL if not adaptive) */
+    uint32_t          *adapt_total;      /* [NETC_CTX_COUNT] total byte count per bucket */
+    netc_tans_table_t *adapt_tables;     /* [NETC_CTX_COUNT] mutable tANS tables (NULL if not adaptive) */
+    uint32_t           adapt_pkt_count;  /* Packets processed since last table rebuild */
 };
 
 /* =========================================================================
@@ -577,6 +588,13 @@ static NETC_INLINE size_t netc_hdr_emit(void *dst,
     }
     netc_hdr_write(dst, h);
     return NETC_HEADER_SIZE;
+}
+
+/* Get the tANS tables to use (adaptive or dict static).
+ * When adaptive mode is active and adapt_tables is populated, returns the
+ * mutable adaptive tables. Otherwise returns the frozen dict tables. */
+static NETC_INLINE const netc_tans_table_t *netc_get_tables(const netc_ctx_t *ctx) {
+    return (ctx->adapt_tables != NULL) ? ctx->adapt_tables : ctx->dict->tables;
 }
 
 #endif /* NETC_INTERNAL_H */

@@ -204,6 +204,18 @@ typedef enum netc_result {
  */
 #define NETC_CFG_FLAG_FAST_COMPRESS 0x100U
 
+/** Adaptive mode: frequency tables and LZP predictions evolve per-connection.
+ *
+ *  When set, the context accumulates byte frequency statistics across packets
+ *  and periodically rebuilds tANS tables to match the observed traffic pattern.
+ *  Both encoder and decoder MUST set this flag — they update tables in lockstep
+ *  using the decompressed bytes (encoder sees original, decoder sees reconstructed).
+ *
+ *  Requires NETC_CFG_FLAG_STATEFUL. Ignored in stateless mode.
+ *  Memory overhead: ~16 KB per context for frequency accumulators.
+ */
+#define NETC_CFG_FLAG_ADAPTIVE    0x200U
+
 /* =========================================================================
  * Opaque types
  * ========================================================================= */

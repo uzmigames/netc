@@ -102,6 +102,7 @@ set(NETC_CORE_SOURCES
     src/core/netc_compress.c
     src/core/netc_decompress.c
     src/algo/netc_tans.c
+    src/algo/netc_adaptive.c
     src/util/netc_crc32.c
     src/simd/netc_simd_generic.c
     src/simd/netc_simd_sse42.c
@@ -176,9 +177,16 @@ if(NETC_BUILD_TESTS)
     add_netc_test(test_compact_header tests/test_compact_header.c)
     add_netc_test(test_tans_10bit       tests/test_tans_10bit.c)
     add_netc_test(test_throughput_opts  tests/test_throughput_opts.c)
+    add_netc_test(test_adaptive        tests/test_adaptive.c)
     add_executable(compress_debug tests/test_compress_debug.c)
     target_include_directories(compress_debug PRIVATE ${UNITY_INC} include src)
     target_link_libraries(compress_debug PRIVATE netc)
+    add_executable(debug_adaptive tests/debug_adaptive.c)
+    target_include_directories(debug_adaptive PRIVATE include src)
+    target_link_libraries(debug_adaptive PRIVATE netc)
+    add_executable(debug_adaptive2 tests/debug_adaptive2.c)
+    target_include_directories(debug_adaptive2 PRIVATE include src)
+    target_link_libraries(debug_adaptive2 PRIVATE netc)
 endif()
 
 # =============================================================================

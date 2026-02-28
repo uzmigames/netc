@@ -79,6 +79,36 @@ netc_ctx_t *netc_ctx_create(const netc_dict_t *dict, const netc_cfg_t *cfg) {
     }
     ctx->prev_pkt_size = 0;
 
+    /* Allocate adaptive mode state (frequency accumulators + mutable tables) */
+    if (cfg->flags & NETC_CFG_FLAG_ADAPTIVE) {
+        if (!(cfg->flags & NETC_CFG_FLAG_STATEFUL)) {
+            /* Adaptive requires stateful mode */
+            free(ctx->prev_pkt);
+            free(ctx->arena);
+            free(ctx->ring);
+            free(ctx);
+            return NULL;
+        }
+        ctx->adapt_freq = (uint32_t *)calloc(NETC_CTX_COUNT * 256, sizeof(uint32_t));
+        ctx->adapt_total = (uint32_t *)calloc(NETC_CTX_COUNT, sizeof(uint32_t));
+        ctx->adapt_tables = (netc_tans_table_t *)calloc(NETC_CTX_COUNT, sizeof(netc_tans_table_t));
+        if (!ctx->adapt_freq || !ctx->adapt_total || !ctx->adapt_tables) {
+            free(ctx->adapt_tables);
+            free(ctx->adapt_total);
+            free(ctx->adapt_freq);
+            free(ctx->prev_pkt);
+            free(ctx->arena);
+            free(ctx->ring);
+            free(ctx);
+            return NULL;
+        }
+        /* Clone initial tables from dict so first packets can encode/decode */
+        if (dict) {
+            memcpy(ctx->adapt_tables, dict->tables, NETC_CTX_COUNT * sizeof(netc_tans_table_t));
+        }
+        ctx->adapt_pkt_count = 0;
+    }
+
     memset(&ctx->stats, 0, sizeof(ctx->stats));
     return ctx;
 }
@@ -91,6 +121,9 @@ void netc_ctx_destroy(netc_ctx_t *ctx) {
     if (ctx == NULL) {
         return;
     }
+    free(ctx->adapt_tables);
+    free(ctx->adapt_total);
+    free(ctx->adapt_freq);
     free(ctx->prev_pkt);
     free(ctx->ring);
     free(ctx->arena);
@@ -116,6 +149,17 @@ void netc_ctx_reset(netc_ctx_t *ctx) {
     ctx->prev_pkt_size = 0;
     ctx->context_seq = 0;
     memset(&ctx->stats, 0, sizeof(ctx->stats));
+
+    /* Reset adaptive state: zero accumulators, re-clone dict tables */
+    if (ctx->adapt_freq) {
+        memset(ctx->adapt_freq, 0, NETC_CTX_COUNT * 256 * sizeof(uint32_t));
+        memset(ctx->adapt_total, 0, NETC_CTX_COUNT * sizeof(uint32_t));
+        /* Re-clone tables from dict baseline */
+        if (ctx->dict) {
+            memcpy(ctx->adapt_tables, ctx->dict->tables, NETC_CTX_COUNT * sizeof(netc_tans_table_t));
+        }
+        ctx->adapt_pkt_count = 0;
+    }
 }
 
 /* =========================================================================

@@ -71,9 +71,10 @@ int bench_netc_init(bench_netc_t *n,
     const char *delta = (flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
     const char *dct   = dict ? "+dict" : "";
     const char *fast  = (flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
+    const char *adapt = (flags & NETC_CFG_FLAG_ADAPTIVE) ? "+adaptive" : "";
     uint8_t     det   = n->enc_ctx ? netc_ctx_simd_level(n->enc_ctx) : simd_level;
-    snprintf(n->name, sizeof(n->name), "netc/%s%s%s simd=%s%s",
-             mode, delta, dct, netc_simd_level_name(det), fast);
+    snprintf(n->name, sizeof(n->name), "netc/%s%s%s%s simd=%s%s",
+             mode, delta, dct, adapt, netc_simd_level_name(det), fast);
 
     return 0;
 }
@@ -126,9 +127,10 @@ int bench_netc_train(bench_netc_t *n,
     const char *mode  = n->stateless ? "stateless" : "stateful";
     const char *delta = (n->flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
     const char *fast  = (n->flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
+    const char *adapt = (n->flags & NETC_CFG_FLAG_ADAPTIVE) ? "+adaptive" : "";
     uint8_t     det   = n->enc_ctx ? netc_ctx_simd_level(n->enc_ctx) : n->simd_level;
-    snprintf(n->name, sizeof(n->name), "netc/%s%s+dict simd=%s%s",
-             mode, delta, netc_simd_level_name(det), fast);
+    snprintf(n->name, sizeof(n->name), "netc/%s%s+dict%s simd=%s%s",
+             mode, delta, adapt, netc_simd_level_name(det), fast);
 
     return 0;
 }

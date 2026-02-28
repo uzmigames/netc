@@ -14,6 +14,7 @@
 
 #include "netc_internal.h"
 #include "../algo/netc_tans.h"
+#include "../algo/netc_adaptive.h"
 #include "../util/netc_bitstream.h"
 #include <string.h>
 
@@ -250,9 +251,11 @@ static uint32_t decomp_bucket_start(uint32_t b) {
  * a subsequent rle_decode pass reconstructs the original bytes.
  * ========================================================================= */
 
-/* Helper: select tANS table for decode — mirrors select_tans_table in netc_compress.c. */
+/* Helper: select tANS table for decode -- mirrors select_tans_table in netc_compress.c. */
 static const netc_tans_table_t *
-decomp_select_tbl(const netc_dict_t *dict, uint32_t bucket,
+decomp_select_tbl(const netc_dict_t *dict,
+                  const netc_tans_table_t *tables,
+                  uint32_t bucket,
                   uint8_t prev_byte, uint8_t pkt_flags)
 {
     if (pkt_flags & NETC_PKT_FLAG_BIGRAM) {
@@ -260,11 +263,12 @@ decomp_select_tbl(const netc_dict_t *dict, uint32_t bucket,
         const netc_tans_table_t *tbl = &dict->bigram_tables[bucket][bclass];
         if (tbl->valid) return tbl;
     }
-    return &dict->tables[bucket];
+    return &tables[bucket];
 }
 
 static netc_result_t decode_tans(
     const netc_dict_t       *dict,
+    const netc_tans_table_t *tables,       /* adaptive or dict->tables */
     const netc_pkt_header_t *hdr,
     const uint8_t           *payload,     /* points past the packet header */
     size_t                   payload_size, /* = hdr->compressed_size */
@@ -326,7 +330,7 @@ static netc_result_t decode_tans(
             if (bits_offset + bs_bytes > bits_avail)
                 return NETC_ERR_CORRUPT;
 
-            const netc_tans_table_t *tbl = decomp_select_tbl(dict, bucket,
+            const netc_tans_table_t *tbl = decomp_select_tbl(dict, tables, bucket,
                                                               region_prev_byte,
                                                               hdr->flags);
             if (!tbl->valid) return NETC_ERR_DICT_INVALID;
@@ -355,7 +359,7 @@ static netc_result_t decode_tans(
         uint32_t bucket = (uint32_t)(hdr->algorithm >> 4);
         if (bucket >= NETC_CTX_COUNT) bucket = 0; /* safety clamp */
         /* prev_byte at position 0 is implicitly 0x00 (packet start), same as encoder */
-        const netc_tans_table_t *tbl = decomp_select_tbl(dict, bucket, 0x00u, hdr->flags);
+        const netc_tans_table_t *tbl = decomp_select_tbl(dict, tables, bucket, 0x00u, hdr->flags);
         if (!tbl->valid) return NETC_ERR_DICT_INVALID;
 
         if (hdr->flags & NETC_PKT_FLAG_X2) {
@@ -421,6 +425,8 @@ netc_result_t netc_decompress(
     }
 
     const int compact_mode = (ctx->flags & NETC_CFG_FLAG_COMPACT_HDR) ? 1 : 0;
+    /* Adaptive tables (when active) or frozen dict tables */
+    const netc_tans_table_t *tables = (ctx->dict != NULL) ? netc_get_tables(ctx) : NULL;
 
     netc_pkt_header_t hdr;
     size_t pkt_hdr_sz = 0;
@@ -503,13 +509,14 @@ netc_result_t netc_decompress(
                 ctx->stats.passthrough_count++;
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            netc_adaptive_update(ctx, (const uint8_t *)dst, hdr.original_size);
             return NETC_OK;
         }
 
         case NETC_ALG_TANS: {
             uint8_t *scratch    = ctx->arena;
             size_t   scratch_cap = ctx->arena_size;
-            r = decode_tans(ctx->dict, &hdr, payload,
+            r = decode_tans(ctx->dict, tables, &hdr, payload,
                             hdr.compressed_size, dst, dst_size,
                             scratch, scratch_cap, compact_mode);
             if (r != NETC_OK) return r;
@@ -539,6 +546,7 @@ netc_result_t netc_decompress(
                 ctx->stats.bytes_out += *dst_size;
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -566,12 +574,12 @@ netc_result_t netc_decompress(
             if ((hdr.flags & NETC_PKT_FLAG_BIGRAM) &&
                 ctx->dict->bigram_tables[0][0].valid) {
                 pctx_rc = netc_tans_decode_pctx_bigram(
-                    ctx->dict->bigram_tables, ctx->dict->tables,
+                    ctx->dict->bigram_tables, tables,
                     ctx->dict->bigram_class_map,
                     &bsr, (uint8_t *)dst, hdr.original_size, initial_state);
             } else {
                 pctx_rc = netc_tans_decode_pctx(
-                    ctx->dict->tables, &bsr,
+                    tables, &bsr,
                     (uint8_t *)dst, hdr.original_size, initial_state);
             }
             if (pctx_rc != 0)
@@ -611,6 +619,7 @@ netc_result_t netc_decompress(
                 ctx->stats.bytes_out += *dst_size;
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -638,6 +647,7 @@ netc_result_t netc_decompress(
                 ctx->stats.bytes_out += *dst_size;
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -648,7 +658,7 @@ netc_result_t netc_decompress(
             if (ctx->dict == NULL || ctx->dict->lzp_table == NULL)
                 return NETC_ERR_DICT_INVALID;
 
-            r = decode_tans(ctx->dict, &hdr, payload,
+            r = decode_tans(ctx->dict, tables, &hdr, payload,
                             hdr.compressed_size, dst, dst_size,
                             ctx->arena, ctx->arena_size, compact_mode);
             if (r != NETC_OK) return r;
@@ -682,6 +692,7 @@ netc_result_t netc_decompress(
                 ctx->stats.bytes_out += *dst_size;
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -694,7 +705,7 @@ netc_result_t netc_decompress(
             if (ctx->dict == NULL) return NETC_ERR_DICT_INVALID;
             uint32_t bucket = (uint32_t)(hdr.algorithm >> 4);
             if (bucket >= NETC_CTX_COUNT) bucket = 0;
-            const netc_tans_table_t *tbl12 = &ctx->dict->tables[bucket];
+            const netc_tans_table_t *tbl12 = &tables[bucket];
             if (!tbl12->valid) return NETC_ERR_DICT_INVALID;
 
             /* 10-bit state is always 2 bytes */
@@ -745,6 +756,7 @@ netc_result_t netc_decompress(
                 ctx->stats.bytes_out += *dst_size;
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
+            netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -826,7 +838,7 @@ netc_result_t netc_decompress_stateless(
         }
 
         case NETC_ALG_TANS:
-            return decode_tans(dict, &hdr, payload,
+            return decode_tans(dict, dict->tables, &hdr, payload,
                                hdr.compressed_size, dst, dst_size,
                                NULL, 0, 0);
 
@@ -871,7 +883,7 @@ netc_result_t netc_decompress_stateless(
             /* LZP XOR + tANS: tANS decode then LZP XOR inverse */
             if (dict->lzp_table == NULL)
                 return NETC_ERR_DICT_INVALID;
-            r = decode_tans(dict, &hdr, payload,
+            r = decode_tans(dict, dict->tables, &hdr, payload,
                             hdr.compressed_size, dst, dst_size,
                             NULL, 0, 0);
             if (r != NETC_OK) return r;

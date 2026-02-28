@@ -93,6 +93,7 @@ typedef struct {
     int no_delta;
     int compact_hdr;
     int fast_compress;
+    int adaptive;
     uint8_t simd_level;
 
     /* Baseline options */
@@ -216,6 +217,7 @@ static int parse_args(int argc, char **argv, bench_args_t *a)
         if (strcmp(arg, "--no-delta")       == 0) { a->no_delta       = 1; continue; }
         if (strcmp(arg, "--compact-hdr")    == 0) { a->compact_hdr    = 1; continue; }
         if (strcmp(arg, "--fast")           == 0) { a->fast_compress  = 1; continue; }
+        if (strcmp(arg, "--adaptive")       == 0) { a->adaptive       = 1; continue; }
         if (strcmp(arg, "--save-baseline")  == 0) { a->save_baseline  = 1; continue; }
         if (strcmp(arg, "--check-baseline") == 0) { a->check_baseline = 1; continue; }
         if (strcmp(arg, "--with-oodle")     == 0) { a->with_oodle     = 1; continue; }
@@ -380,6 +382,7 @@ int main(int argc, char **argv)
     if (!args.no_delta)    flags |= NETC_CFG_FLAG_DELTA;
     if (args.compact_hdr)  flags |= NETC_CFG_FLAG_COMPACT_HDR;
     if (args.fast_compress) flags |= NETC_CFG_FLAG_FAST_COMPRESS;
+    if (args.adaptive)      flags |= NETC_CFG_FLAG_ADAPTIVE;
 
     /* Allocate result storage */
     bench_result_t *results = (bench_result_t *)calloc(BENCH_MAX_RESULTS,

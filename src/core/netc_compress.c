@@ -23,6 +23,7 @@
 
 #include "netc_internal.h"
 #include "../algo/netc_tans.h"
+#include "../algo/netc_adaptive.h"
 #include "../util/netc_bitstream.h"
 #include <string.h>
 #include <limits.h>
@@ -454,7 +455,9 @@ static size_t lz77x_encode(
  * Otherwise returns the unigram table for `bucket`.
  * ========================================================================= */
 static NETC_INLINE const netc_tans_table_t *
-select_tans_table(const netc_dict_t *dict, uint32_t bucket,
+select_tans_table(const netc_dict_t *dict,
+                  const netc_tans_table_t *tables,
+                  uint32_t bucket,
                   uint8_t prev_byte, uint32_t ctx_flags)
 {
     if (ctx_flags & NETC_CFG_FLAG_BIGRAM) {
@@ -462,7 +465,7 @@ select_tans_table(const netc_dict_t *dict, uint32_t bucket,
         const netc_tans_table_t *tbl = &dict->bigram_tables[bucket][bclass];
         if (tbl->valid) return tbl;
     }
-    return &dict->tables[bucket];
+    return &tables[bucket];
 }
 
 /* =========================================================================
@@ -586,6 +589,7 @@ static size_t try_tans_10bit_with_table(
  * ========================================================================= */
 static int try_tans_single_region(
     const netc_dict_t *dict,
+    const netc_tans_table_t *tables,  /* adaptive or dict->tables */
     const uint8_t     *src,
     size_t             src_size,
     uint8_t           *dst,
@@ -602,7 +606,7 @@ static int try_tans_single_region(
     uint32_t first_bucket = netc_ctx_bucket(0);
     uint32_t last_bucket  = netc_ctx_bucket((uint32_t)(src_size > 0 ? src_size - 1 : 0));
 
-    /* For small packets (≤512B) scan all bucket tables covering this packet's
+    /* For small packets (<=512B) scan all bucket tables covering this packet's
      * offset range and pick the table that yields smallest output.
      * Bigram mode is excluded from multi-scan (no prev_byte continuity). */
     if (!(ctx_flags & NETC_CFG_FLAG_BIGRAM) && src_size <= 512u &&
@@ -615,10 +619,10 @@ static int try_tans_single_region(
         int      best_x2     = 0;
 
         for (uint32_t b = first_bucket; b <= last_bucket; b++) {
-            if (!dict->tables[b].valid) continue;
+            if (!tables[b].valid) continue;
             int trial_x2 = 0;
             size_t cp = try_tans_single_with_table(
-                &dict->tables[b], src, src_size,
+                &tables[b], src, src_size,
                 trial_buf, sizeof(trial_buf), &trial_x2, ctx_flags, compact);
             if (cp != (size_t)-1 && cp < best_cp) {
                 best_cp     = cp;
@@ -632,7 +636,7 @@ static int try_tans_single_region(
         /* Re-encode with the best table directly into dst */
         int final_x2 = 0;
         size_t final_cp = try_tans_single_with_table(
-            &dict->tables[best_bucket], src, src_size,
+            &tables[best_bucket], src, src_size,
             dst, dst_payload_cap, &final_x2, ctx_flags, compact);
         if (final_cp == (size_t)-1) return -1;
 
@@ -647,7 +651,7 @@ static int try_tans_single_region(
     uint32_t bucket = first_bucket;
     *out_table_idx  = bucket;
 
-    const netc_tans_table_t *tbl = select_tans_table(dict, bucket, 0x00u, ctx_flags);
+    const netc_tans_table_t *tbl = select_tans_table(dict, tables, bucket, 0x00u, ctx_flags);
     size_t cp = try_tans_single_with_table(tbl, src, src_size, dst,
                                            dst_payload_cap, used_x2_flag, ctx_flags, compact);
     if (cp == (size_t)-1) return -1;
@@ -669,6 +673,7 @@ static int try_tans_single_region(
  * ========================================================================= */
 static int try_tans_compress(
     const netc_dict_t *dict,
+    const netc_tans_table_t *tables,  /* adaptive or dict->tables */
     const uint8_t     *src,
     size_t             src_size,
     uint8_t           *dst,             /* points past the packet header */
@@ -693,7 +698,7 @@ static int try_tans_compress(
 
     /* For single-bucket packets use the simpler legacy format (less overhead) */
     if (n_regions == 1) {
-        return try_tans_single_region(dict, src, src_size, dst, dst_payload_cap,
+        return try_tans_single_region(dict, tables, src, src_size, dst, dst_payload_cap,
                                       compressed_payload_size, used_mreg_flag,
                                       used_x2_flag, out_table_idx, ctx_flags,
                                       compact);
@@ -701,7 +706,7 @@ static int try_tans_compress(
 
     /* Validate all per-bucket tables */
     for (uint32_t b = first_bucket; b <= last_bucket; b++) {
-        if (!dict->tables[b].valid) return -1;
+        if (!tables[b].valid) return -1;
     }
 
     /* --- PCTX path: per-position context-adaptive tANS (v0.4+) ---
@@ -719,7 +724,7 @@ static int try_tans_compress(
         netc_bsw_init(&bsw, dst + state_sz, dst_payload_cap - state_sz);
 
         uint32_t pctx_state = netc_tans_encode_pctx(
-            dict->tables, src, src_size, &bsw, NETC_TANS_TABLE_SIZE);
+            tables, src, src_size, &bsw, NETC_TANS_TABLE_SIZE);
 
         if (pctx_state != 0) {
             size_t pctx_bs = netc_bsw_flush(&bsw);
@@ -737,7 +742,7 @@ static int try_tans_compress(
                     netc_bsw_init(&bsw_bg, dst + state_sz, dst_payload_cap - state_sz);
 
                     uint32_t bg_state = netc_tans_encode_pctx_bigram(
-                        dict->bigram_tables, dict->tables, dict->bigram_class_map,
+                        dict->bigram_tables, tables, dict->bigram_class_map,
                         src, src_size, &bsw_bg, NETC_TANS_TABLE_SIZE);
 
                     if (bg_state != 0) {
@@ -745,18 +750,18 @@ static int try_tans_compress(
                         if (bg_bs != (size_t)-1) {
                             size_t bg_total = state_sz + bg_bs;
                             if (bg_total < pctx_total) {
-                                /* Bigram-PCTX wins — dst already has the bigram bitstream */
+                                /* Bigram-PCTX wins -- dst already has the bigram bitstream */
                                 pctx_total    = bg_total;
                                 pctx_state    = bg_state;
                                 pctx_is_bigram = 1;
                             } else {
-                                /* Unigram PCTX wins — re-encode unigram into dst
+                                /* Unigram PCTX wins -- re-encode unigram into dst
                                  * (bigram trial clobbered it) */
                                 netc_bsw_t bsw_re;
                                 netc_bsw_init(&bsw_re, dst + state_sz,
                                               dst_payload_cap - state_sz);
                                 pctx_state = netc_tans_encode_pctx(
-                                    dict->tables, src, src_size,
+                                    tables, src, src_size,
                                     &bsw_re, NETC_TANS_TABLE_SIZE);
                                 netc_bsw_flush(&bsw_re);
                             }
@@ -766,7 +771,7 @@ static int try_tans_compress(
 
                 /* For small packets, also try single-region best-fit to compare.
                  * Skipped when NETC_INTERNAL_SKIP_SR is set (pre-filtered data:
-                 * delta residuals or LZP XOR output) — PCTX with per-position
+                 * delta residuals or LZP XOR output) -- PCTX with per-position
                  * tables dominates any single-region table for these inputs. */
                 if (src_size <= 512u && !(ctx_flags & NETC_INTERNAL_SKIP_SR)) {
                     uint8_t trial_buf[520];
@@ -774,12 +779,12 @@ static int try_tans_compress(
                     int     sr_mreg = 0, sr_x2 = 0;
                     uint32_t sr_tbl_idx = 0;
 
-                    if (try_tans_single_region(dict, src, src_size,
+                    if (try_tans_single_region(dict, tables, src, src_size,
                             trial_buf, sizeof(trial_buf),
                             &sr_cp, &sr_mreg, &sr_x2, &sr_tbl_idx,
                             ctx_flags, compact) == 0 && sr_cp < pctx_total)
                     {
-                        /* Single-region beats PCTX — copy to dst and use it */
+                        /* Single-region beats PCTX -- copy to dst and use it */
                         memcpy(dst, trial_buf, sr_cp);
                         *compressed_payload_size = sr_cp;
                         *used_mreg_flag  = sr_mreg;
@@ -789,7 +794,7 @@ static int try_tans_compress(
                     }
                 }
 
-                /* PCTX wins — write initial state */
+                /* PCTX wins -- write initial state */
                 if (compact)
                     netc_write_u16_le(dst, (uint16_t)pctx_state);
                 else
@@ -804,7 +809,7 @@ static int try_tans_compress(
     }
 
     /* Fallback: single-region best-fit table selection */
-    return try_tans_single_region(dict, src, src_size, dst, dst_payload_cap,
+    return try_tans_single_region(dict, tables, src, src_size, dst, dst_payload_cap,
                                   compressed_payload_size, used_mreg_flag,
                                   used_x2_flag, out_table_idx, ctx_flags,
                                   compact);
@@ -837,6 +842,8 @@ netc_result_t netc_compress(
 
     uint8_t seq  = ctx->context_seq++;
     const netc_dict_t *dict = ctx->dict;
+    /* Adaptive tables (when active) or frozen dict tables */
+    const netc_tans_table_t *tables = (dict != NULL) ? netc_get_tables(ctx) : NULL;
     const int compact_mode = (ctx->flags & NETC_CFG_FLAG_COMPACT_HDR) ? 1 : 0;
     const size_t hdr_sz = compact_mode
         ? (src_size <= 127u ? NETC_COMPACT_HDR_MIN : NETC_COMPACT_HDR_MAX)
@@ -907,7 +914,7 @@ netc_result_t netc_compress(
         if (did_delta || did_lzp || (ctx->flags & NETC_CFG_FLAG_FAST_COMPRESS))
             tans_ctx_flags |= NETC_INTERNAL_SKIP_SR;
 
-        if (try_tans_compress(dict, compress_src, src_size,
+        if (try_tans_compress(dict, tables, compress_src, src_size,
                               payload, payload_cap,
                               &compressed_payload, &used_mreg, &used_x2, &tbl_idx,
                               tans_ctx_flags, compact_mode) == 0 &&
@@ -948,7 +955,7 @@ netc_result_t netc_compress(
                     & ~(uint32_t)NETC_CFG_FLAG_DELTA)
                     | (compact_mode ? NETC_INTERNAL_NO_X2 : 0u)
                     | NETC_INTERNAL_SKIP_SR;
-                if (try_tans_compress(dict, lzp_trial_src, src_size,
+                if (try_tans_compress(dict, tables, lzp_trial_src, src_size,
                                       lzp_trial_dst, sizeof(lzp_trial_dst),
                                       &lzp_cp, &lzp_mreg, &lzp_x2, &lzp_tbl,
                                       lzp_ctx, compact_mode) == 0 &&
@@ -1017,9 +1024,10 @@ netc_result_t netc_compress(
                             ctx->stats.bytes_out += *dst_size;
                             ctx->stats.passthrough_count++;
                         }
+                        netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
-                    /* LZ77 didn't beat tANS — tANS payload in dst is still valid */
+                    /* LZ77 didn't beat tANS -- tANS payload in dst is still valid */
                 } else if (did_delta && src_size <= 1024) {
                     /* Case B: arena holds delta residuals, so we can't use it for LZ77.
                      * Quick redundancy check: count distinct byte values in the first
@@ -1079,9 +1087,10 @@ netc_result_t netc_compress(
                             ctx->stats.bytes_out += *dst_size;
                             ctx->stats.passthrough_count++;
                         }
+                        netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
-                    /* LZ77 lost — restore tANS output from stack */
+                    /* LZ77 lost -- restore tANS output from stack */
                     memcpy(payload, tans_save, tans_cp_save);
                     compressed_payload = tans_cp_save;
                     used_mreg = tans_used_mreg_save;
@@ -1172,6 +1181,7 @@ case_b_skip:;
                             ctx->stats.bytes_in  += src_size;
                             ctx->stats.bytes_out += *dst_size;
                         }
+                        netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
                 }
@@ -1196,7 +1206,7 @@ case_b_skip:;
                 compact_mode)
             {
                 /* Rescale the winning 12-bit freq table to 10-bit (1024-sum) */
-                const netc_tans_table_t *tbl12 = &dict->tables[tbl_idx];
+                const netc_tans_table_t *tbl12 = &tables[tbl_idx];
                 netc_freq_table_t freq10;
                 if (netc_freq_rescale_12_to_10(&tbl12->freq, &freq10) == 0) {
                     netc_tans_table_10_t tbl10;
@@ -1261,6 +1271,7 @@ case_b_skip:;
                 ctx->stats.bytes_in  += src_size;
                 ctx->stats.bytes_out += *dst_size;
             }
+            netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
             return NETC_OK;
         }
     }
@@ -1292,7 +1303,7 @@ case_b_skip:;
             if (compact_mode)
                 raw_ctx_flags |= NETC_INTERNAL_NO_X2;
         }
-        if (try_tans_compress(dict, raw_src, src_size,
+        if (try_tans_compress(dict, tables, raw_src, src_size,
                               payload, payload_cap,
                               &raw_payload, &raw_mreg, &raw_x2, &raw_tbl,
                               raw_ctx_flags, compact_mode) == 0 &&
@@ -1365,6 +1376,7 @@ case_b_skip:;
                             ctx->stats.bytes_in  += src_size;
                             ctx->stats.bytes_out += *dst_size;
                         }
+                        netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
                 }
@@ -1377,7 +1389,7 @@ case_b_skip:;
                 !(raw_ctx_flags & NETC_CFG_FLAG_BIGRAM) &&
                 compact_mode)
             {
-                const netc_tans_table_t *tbl12 = &dict->tables[raw_tbl];
+                const netc_tans_table_t *tbl12 = &tables[raw_tbl];
                 netc_freq_table_t freq10;
                 if (netc_freq_rescale_12_to_10(&tbl12->freq, &freq10) == 0) {
                     netc_tans_table_10_t tbl10;
@@ -1433,6 +1445,7 @@ case_b_skip:;
                 ctx->stats.bytes_in  += src_size;
                 ctx->stats.bytes_out += *dst_size;
             }
+            netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
             return NETC_OK;
         }
     }
@@ -1531,6 +1544,7 @@ case_b_skip:;
                 ctx->stats.bytes_out += *dst_size;
                 ctx->stats.passthrough_count++;
             }
+            netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
             return NETC_OK;
         }
     }
@@ -1545,9 +1559,14 @@ lz77_failed:
     /* Ring buffer update even for passthrough — decoder always has original bytes */
     ctx_ring_append(ctx, (const uint8_t *)src, src_size);
 
-    /* Fall back to passthrough (no delta flag — raw bytes in payload) */
-    return emit_passthrough(ctx, dict, src, src_size, dst, dst_cap, dst_size, seq,
-                            compact_mode);
+    /* Fall back to passthrough (no delta flag -- raw bytes in payload) */
+    {
+        netc_result_t pt_r = emit_passthrough(ctx, dict, src, src_size, dst, dst_cap,
+                                               dst_size, seq, compact_mode);
+        if (pt_r == NETC_OK)
+            netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+        return pt_r;
+    }
 }
 
 /* =========================================================================
@@ -1594,7 +1613,7 @@ netc_result_t netc_compress_stateless(
             sl_did_lzp = 1;
         }
 
-        int tans_ok = (try_tans_compress(dict, tans_src, src_size,
+        int tans_ok = (try_tans_compress(dict, dict->tables, tans_src, src_size,
                                          payload, payload_cap,
                                          &compressed_payload, &used_mreg, &used_x2,
                                          &tbl_idx,

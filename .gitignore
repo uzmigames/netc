@@ -27,6 +27,7 @@ tmp/
 build/
 build-bench/
 build-trace/
+build-debug/
 build-pgo-baseline/
 build-pgo-instrument/
 build-pgo-optimized/
