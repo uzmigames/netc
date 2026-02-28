@@ -86,10 +86,25 @@ static uint32_t dict_blob_checksum(const uint8_t *blob, size_t blob_size) {
 /* =========================================================================
  * freq_normalize — scale raw counts to sum exactly to TABLE_SIZE (4096).
  *
- * Algorithm (from Zstd/FSE):
- *   1. If all counts are 0, assign uniform distribution.
- *   2. Scale each count proportionally: scaled[s] = max(1, raw[s] * TABLE_SIZE / total).
- *   3. Correct rounding error by adjusting the largest symbol.
+ * Two-phase floor+proportional normalization:
+ *
+ *   Phase 1: Every symbol gets freq=1 (safety floor guaranteeing any byte
+ *            can be encoded). This reserves 256 of 4096 slots (6.25%).
+ *
+ *   Phase 2: The remaining 3840 slots are distributed proportionally
+ *            among symbols that appeared in training (raw[s] > 0).
+ *            Unseen symbols stay at freq=1, receiving no bonus.
+ *
+ * vs old Laplace (add-1 + proportional on smoothed total):
+ *   Laplace scales each smoothed[s]=(raw[s]+1) against (total+256),
+ *   which gives unseen symbols a share proportional to 1/(total+256).
+ *   With 50K training bytes, each unseen symbol gets ~0.08 bonus slots,
+ *   but cumulated over ~50 unseen symbols this steals resolution from
+ *   frequent symbols. The new approach gives ALL 3840 bonus slots to
+ *   seen symbols only, yielding tighter probability estimates.
+ *
+ * Rounding correction: the most-frequent symbol absorbs drift to
+ * guarantee out[] sums to exactly TABLE_SIZE.
  * ========================================================================= */
 
 static void freq_normalize(
@@ -97,32 +112,44 @@ static void freq_normalize(
     uint64_t        total,
     uint16_t        out[NETC_TANS_SYMBOLS])
 {
-    /* Laplace smoothing: add 1 to every symbol's count.
-     * This ensures all 256 symbols have freq >= 1 after normalization,
-     * allowing any byte to be entropy-coded regardless of training data.
-     * The smoothed total is total + NETC_TANS_SYMBOLS. */
-    uint64_t smoothed_total = total + (uint64_t)NETC_TANS_SYMBOLS;
+    /* Phase 1: safety floor — all 256 symbols get freq=1 */
+    for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++)
+        out[s] = 1;
 
-    uint32_t table_sum = 0;
+    if (total == 0) {
+        /* No training data → uniform: each symbol gets TABLE_SIZE/256 = 16 */
+        for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++)
+            out[s] = (uint16_t)(NETC_TANS_TABLE_SIZE / NETC_TANS_SYMBOLS);
+        return;
+    }
+
+    /* Phase 2: distribute remaining budget to seen symbols only */
+    const uint32_t budget = NETC_TANS_TABLE_SIZE - NETC_TANS_SYMBOLS; /* 3840 */
+    uint32_t table_sum = NETC_TANS_SYMBOLS; /* 256 from floor */
     int      max_sym   = 0;
-    uint32_t max_val   = 0;
+    uint32_t max_val   = 1;
 
     for (int s = 0; s < (int)NETC_TANS_SYMBOLS; s++) {
-        uint64_t smoothed = raw[s] + 1u;
-        uint64_t scaled   = (smoothed * (uint64_t)NETC_TANS_TABLE_SIZE) / smoothed_total;
-        if (scaled == 0) scaled = 1;
-        if (scaled > 0xFFFFU) scaled = 0xFFFFU;
-        out[s]     = (uint16_t)scaled;
-        table_sum += (uint32_t)scaled;
+        if (raw[s] == 0) continue;
+
+        /* Proportional share of 3840-slot budget.
+         * Raw count with +1 smoothing against seen-only total gives
+         * slightly more resolution to rare-but-seen symbols. */
+        uint64_t bonus = (raw[s] * (uint64_t)budget) / total;
+        if (bonus > 0xFFFEU) bonus = 0xFFFEU;
+
+        out[s]     = (uint16_t)(1U + (uint32_t)bonus);
+        table_sum += (uint32_t)bonus;
+
         if (out[s] > max_val) {
             max_val = out[s];
             max_sym = s;
         }
     }
 
-    /* Adjust largest symbol to correct rounding drift */
+    /* Correct rounding drift on the largest symbol */
     if (table_sum < NETC_TANS_TABLE_SIZE) {
-        out[max_sym] = (uint16_t)(out[max_sym] + (uint16_t)(NETC_TANS_TABLE_SIZE - table_sum));
+        out[max_sym] = (uint16_t)(out[max_sym] + (NETC_TANS_TABLE_SIZE - table_sum));
     } else if (table_sum > NETC_TANS_TABLE_SIZE) {
         uint32_t excess = table_sum - NETC_TANS_TABLE_SIZE;
         if (out[max_sym] > (uint16_t)excess + 1U) {
