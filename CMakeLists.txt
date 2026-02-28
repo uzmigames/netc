@@ -251,8 +251,20 @@ elseif(NETC_PGO_OPTIMIZE AND NOT MSVC)
                 "Run an instrumentation build first: cmake -DNETC_PGO_INSTRUMENT=ON .")
     endif()
     message(STATUS "PGO: optimized build using profile data from ${NETC_PGO_DATA_DIR}")
-    target_compile_options(netc PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR} -fprofile-correction)
-    target_link_options(netc   PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR})
+    if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        # Clang uses -fprofile-instr-use with merged .profdata file
+        set(_PROFDATA "${NETC_PGO_DATA_DIR}/default.profdata")
+        if(NOT EXISTS "${_PROFDATA}")
+            message(FATAL_ERROR "Clang PGO: ${_PROFDATA} not found.\n"
+                    "Merge .profraw files first: llvm-profdata merge -output=default.profdata *.profraw")
+        endif()
+        target_compile_options(netc PRIVATE -fprofile-instr-use=${_PROFDATA} -Wno-error=profile-instr-unprofiled)
+        target_link_options(netc   PRIVATE -fprofile-instr-use=${_PROFDATA})
+    else()
+        # GCC uses -fprofile-use with directory of .gcda files
+        target_compile_options(netc PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR} -fprofile-correction -Wno-error=missing-profile)
+        target_link_options(netc   PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR})
+    endif()
 endif()
 
 # =============================================================================

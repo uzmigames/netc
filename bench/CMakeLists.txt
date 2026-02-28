@@ -48,6 +48,21 @@ if(UNIX)
     target_link_libraries(bench PRIVATE m)
 endif()
 
+# Inherit PGO flags for correct linking
+if(NETC_PGO_INSTRUMENT AND NOT MSVC)
+    target_compile_options(bench PRIVATE -fprofile-generate=${NETC_PGO_DATA_DIR})
+    target_link_options(bench   PRIVATE -fprofile-generate=${NETC_PGO_DATA_DIR})
+elseif(NETC_PGO_OPTIMIZE AND NOT MSVC)
+    if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set(_PROFDATA "${NETC_PGO_DATA_DIR}/default.profdata")
+        target_compile_options(bench PRIVATE -fprofile-instr-use=${_PROFDATA} -Wno-error=profile-instr-unprofiled)
+        target_link_options(bench   PRIVATE -fprofile-instr-use=${_PROFDATA})
+    else()
+        target_compile_options(bench PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR} -fprofile-correction -Wno-error=missing-profile)
+        target_link_options(bench   PRIVATE -fprofile-use=${NETC_PGO_DATA_DIR})
+    endif()
+endif()
+
 # Inherit parent SIMD flags
 if(NETC_SIMD_FLAGS)
     target_compile_options(bench PRIVATE ${NETC_SIMD_FLAGS})
@@ -56,6 +71,16 @@ endif()
 # MSVC: suppress C4996 for gmtime (use gmtime_s on Windows)
 if(MSVC)
     target_compile_definitions(bench PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# POSIX: clock_gettime requires _POSIX_C_SOURCE >= 199309L
+if(UNIX)
+    target_compile_definitions(bench PRIVATE _POSIX_C_SOURCE=199309L)
+endif()
+
+# GCC/Clang: relax -Werror for bench code (not core library)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(bench PRIVATE -Wno-error)
 endif()
 
 # ============================================================================

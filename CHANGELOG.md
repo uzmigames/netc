@@ -28,7 +28,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **LZP compact mode X2 mismatch** — LZP compact packet types cannot encode the X2 (dual-state) flag. For packets ≥ 256B, X2 encoding was selected but silently dropped from the compact header, causing the decompressor to decode with single-state instead of dual-state. Fixed by adding `NETC_INTERNAL_NO_X2` suppression flag. Affected WL-003 (256B), WL-005 (512B), and WL-008 (mixed traffic).
 - **tANS-raw fallback LZP path** — the fallback path (delta residuals too noisy → retry on raw bytes with LZP) did not strip BIGRAM or suppress X2 in compact mode. Same root cause as above, different code path.
 
+### Added
+
+- **`NETC_MAYBE_UNUSED` macro** (`src/util/netc_platform.h`) — portable `__attribute__((unused))` abstraction for GCC/Clang, no-op on MSVC. Suppresses unused-function warnings for reserve code paths (e.g. `rle_encode`, `bucket_start_offset`).
+- **GCC/Clang cross-compilation support for bench** — `_POSIX_C_SOURCE=199309L` for `clock_gettime`, `-Wno-error` for bench code (not core library), PGO link flags propagated to bench executable.
+- **Clang PGO support** — CMake now detects Clang and uses `-fprofile-instr-generate` / `-fprofile-instr-use` with `llvm-profdata merge` instead of GCC's `-fprofile-generate` / `-fprofile-use`. Both compilers now work with the three-step PGO workflow.
+
 ### Changed
+
+- **PGO evaluated — modest throughput gains, not 5-15% as originally projected:**
+  - **Clang 18 PGO**: Stable +2-4% compress throughput across workloads. Best case +6.9% (WL-004 32B). Decompress +1-5% average. Recommended as optional optimization.
+  - **GCC 13 PGO**: Inconsistent results — some workloads improve (+13.5% WL-007), others degrade (-6.5% WL-001). Not recommended for production.
+  - **Root cause**: Code already uses `-O3` with manual `NETC_LIKELY`/`NETC_UNLIKELY`, `NETC_PREFETCH`, and `always_inline` hints, reducing the improvement space for PGO.
+  - **Compression ratio**: Unchanged (PGO optimizes throughput, not algorithm output).
 
 - Compression ratio improved significantly with compact headers and delta-LZP comparison:
   - WL-001 (64B): 0.908 -> **0.765** compact / **0.890** legacy

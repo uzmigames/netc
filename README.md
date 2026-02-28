@@ -289,10 +289,51 @@ netc/
 | Security hardening + fuzz | Done |
 | Benchmark harness | Done |
 | ARM NEON SIMD | Planned |
-| Profile-Guided Optimization (PGO) | Planned (requires GCC/Clang) |
+| Profile-Guided Optimization (PGO) | Evaluated (+2-4% Clang, inconsistent GCC) |
 | C++ SDK (Unreal Engine 5) | Planned |
 | C# SDK (Unity / Godot 4) | Planned |
 | v0.1.0 release tag | Pending |
+
+---
+
+## Profile-Guided Optimization (PGO)
+
+PGO was evaluated with GCC 13.3 and Clang 18.1 on Linux (WSL2 Ubuntu 24.04), using 500,000 profiling iterations across all 8 workloads.
+
+### Results Summary
+
+| Compiler | Compress Throughput | Decompress Throughput | Stability |
+|----------|:-------------------:|:---------------------:|-----------|
+| **Clang 18 PGO** | **+2-4%** avg, +6.9% best | **+1-5%** avg | Stable, recommended |
+| GCC 13 PGO | -6% to +13% | +2-16% | Inconsistent, not recommended |
+
+**Compression ratio is unchanged** — PGO optimizes branch prediction and code layout, not algorithm output.
+
+### Why the Modest Gains?
+
+The codebase already applies manual optimizations that overlap with PGO's benefits:
+- `NETC_LIKELY`/`NETC_UNLIKELY` branch hints on all hot-path conditionals
+- `NETC_PREFETCH` for memory prefetching in tight loops
+- `NETC_INLINE` (`always_inline`) on all critical inner functions
+- `-O3` baseline with loop unrolling and vectorization
+
+### Using PGO (Optional, Clang Recommended)
+
+```bash
+# Step 1: Instrument
+cmake -B build-pgo -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_BUILD_TYPE=Release -DNETC_BUILD_BENCH=ON \
+  -DNETC_PGO_INSTRUMENT=ON
+cmake --build build-pgo -j$(nproc)
+
+# Step 2: Profile (500k+ iterations recommended)
+./build-pgo/bench/bench --compressor=netc --count=500000 --compact-hdr
+
+# Step 3: Merge + Optimize
+llvm-profdata merge -output=build-pgo/pgo_data/default.profdata build-pgo/pgo_data/*.profraw
+cmake -B build-pgo -DNETC_PGO_INSTRUMENT=OFF -DNETC_PGO_OPTIMIZE=ON
+cmake --build build-pgo --clean-first -j$(nproc)
+```
 
 ---
 

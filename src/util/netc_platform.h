@@ -54,6 +54,18 @@
 #endif
 
 /* =========================================================================
+ * NETC_MAYBE_UNUSED — suppress unused-function/variable warnings
+ * ========================================================================= */
+
+#if defined(NETC_COMPILER_GCC) || defined(NETC_COMPILER_CLANG)
+#  define NETC_MAYBE_UNUSED __attribute__((unused))
+#elif defined(NETC_COMPILER_MSVC)
+#  define NETC_MAYBE_UNUSED
+#else
+#  define NETC_MAYBE_UNUSED
+#endif
+
+/* =========================================================================
  * NETC_ALIGN(N) — alignment attribute
  * ========================================================================= */
 

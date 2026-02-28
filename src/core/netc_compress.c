@@ -35,7 +35,7 @@
 /* =========================================================================
  * Internal: FNV-1a hash of 3 bytes folded to 4096 (for ring_ht)
  * ========================================================================= */
-static NETC_INLINE uint32_t ring_ht_hash3(const uint8_t *p)
+NETC_MAYBE_UNUSED static NETC_INLINE uint32_t ring_ht_hash3(const uint8_t *p)
 {
     uint32_t h = 2166136261u;
     h ^= p[0]; h *= 16777619u;
@@ -122,7 +122,7 @@ static netc_result_t emit_passthrough(
  * Given a bucket index b, return the first byte offset that falls in it.
  * This mirrors the inverse of netc_ctx_bucket().
  * ========================================================================= */
-static uint32_t bucket_start_offset(uint32_t b) {
+NETC_MAYBE_UNUSED static uint32_t bucket_start_offset(uint32_t b) {
     static const uint32_t starts[NETC_CTX_COUNT] = {
            0,    8,   16,   24,   32,   48,   64,   96,
          128,  192,  256,  384,  512, 1024, 4096, 16384
@@ -138,7 +138,7 @@ static uint32_t bucket_start_offset(uint32_t b) {
  *
  * Returns the number of bytes written to dst_rle, or (size_t)-1 on failure.
  * ========================================================================= */
-static size_t rle_encode(const uint8_t *src, size_t src_size,
+NETC_MAYBE_UNUSED static size_t rle_encode(const uint8_t *src, size_t src_size,
                           uint8_t *dst_rle,  size_t rle_cap)
 {
     size_t out = 0;
