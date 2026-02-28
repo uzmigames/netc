@@ -1,9 +1,8 @@
-# netc C# SDK — Unity and Godot 4
+# netc C# SDK — Unity
 
 ```
 SDK Version:  0.1.0
 Unity:        2022.3 LTS+, 6.x
-Godot:        4.x (.NET)
 Runtime:      .NET 6+, Mono 6.12+
 Platforms:    Win64, Linux x86_64, macOS ARM64, Android ARM64, iOS ARM64
 Depends:      netc core library (libnetc native)
@@ -27,12 +26,11 @@ Depends:      netc core library (libnetc native)
 7. [Stateful Compression](#7-stateful-compression)
 8. [Stateless Compression](#8-stateless-compression)
 9. [Unity Integration Patterns](#9-unity-integration-patterns)
-10. [Godot Integration Patterns](#10-godot-integration-patterns)
-11. [Thread Safety](#11-thread-safety)
-12. [Memory Model](#12-memory-model)
-13. [Error Handling](#13-error-handling)
-14. [Build System](#14-build-system)
-15. [Testing](#15-testing)
+10. [Thread Safety](#10-thread-safety)
+11. [Memory Model](#11-memory-model)
+12. [Error Handling](#12-error-handling)
+13. [Build System](#13-build-system)
+14. [Testing](#14-testing)
 
 ---
 
@@ -44,7 +42,7 @@ The netc C# SDK wraps the netc C core library (`libnetc`) with idiomatic .NET ty
 - **IDisposable lifecycle** — `NetcDict` and `NetcContext` implement `IDisposable` and release native memory deterministically via `using` blocks.
 - **Thread-safe dictionaries** — a single `NetcDict` can be shared read-only across all `NetcContext` instances on all threads without synchronization.
 - **Transport-agnostic** — works with any byte buffer (Mirror, FishNet, NGO, ENet, WebRTC, raw sockets, or custom transports). No socket management.
-- **Unity and Godot adapters** — optional `NetcMirrorTransport` (Mirror), `NetcFishNetTransport` (FishNet), and `NetcMultiplayerPeer` (Godot 4) provided as separate assemblies.
+- **Unity adapters** — optional `NetcMirrorTransport` (Mirror) and `NetcFishNetTransport` (FishNet) provided as a separate assembly.
 
 ### What the SDK does NOT do
 
@@ -71,17 +69,6 @@ Add to `Packages/manifest.json`:
 ```
 
 Native libraries (`netc_win64.dll`, `netc_linux64.so`, `netc_macos_arm64.dylib`) are bundled under `Plugins/` with correct platform metadata.
-
-### 2.2 Godot 4 (.NET)
-
-Reference the NuGet package or add the `.csproj` reference:
-
-```xml
-<ItemGroup>
-  <ProjectReference Include="../../sdk/csharp/Netc.Core/Netc.Core.csproj" />
-  <ProjectReference Include="../../sdk/csharp/Netc.Godot/Netc.Godot.csproj" />
-</ItemGroup>
-```
 
 ---
 
@@ -390,52 +377,7 @@ public class NetcManager : MonoBehaviour
 
 ---
 
-## 10. Godot Integration Patterns
-
-### 10.1 NetcMultiplayerPeer (Godot 4)
-
-`NetcMultiplayerPeer` implements `MultiplayerPeerExtension` and wraps ENet or WebRTC:
-
-```csharp
-[GlobalClass]
-public partial class NetcMultiplayerPeer : MultiplayerPeerExtension
-{
-    private NetcDict _dict;
-    private readonly Dictionary<int, NetcContext> _ctxByPeer = new();
-
-    public override Error _SendBytes(byte[] bytes, int id, MultiplayerPeer.TransferModeEnum mode, int channel)
-    {
-        var ctx = GetOrCreateContext(id);
-        byte[] dst = new byte[NetcContext.MaxCompressedSize(bytes.Length)];
-        int len = ctx.Compress(bytes, dst);
-        return _inner._SendBytes(dst[..len], id, mode, channel);
-    }
-
-    public override byte[] _GetPacket()
-    {
-        byte[] received = _inner._GetPacket();
-        int senderId = _inner._GetPacketPeer();
-        var ctx = GetOrCreateContext(senderId);
-        byte[] dst = new byte[received.Length]; // header carries original_size
-        ctx.Decompress(received, dst);
-        return dst;
-    }
-}
-```
-
-### 10.2 GDScript Interop
-
-The C# layer handles all compression transparently. GDScript code requires no changes:
-
-```gdscript
-# GDScript — unchanged
-multiplayer.multiplayer_peer = NetcMultiplayerPeer.new()
-rpc("update_state", position, velocity)
-```
-
----
-
-## 11. Thread Safety
+## 10. Thread Safety
 
 | Object | Thread Safety |
 |--------|---------------|
@@ -458,7 +400,7 @@ var ctx2 = NetcContext.Create(dict);  // connection B
 
 ---
 
-## 12. Memory Model
+## 11. Memory Model
 
 ### 12.1 Native Memory
 
@@ -494,7 +436,7 @@ using var ctx = NetcContext.Create(dict);
 
 ---
 
-## 13. Error Handling
+## 12. Error Handling
 
 All errors are signaled by throwing `NetcException` (wraps `NetcResult`):
 
@@ -530,13 +472,13 @@ catch (NetcException ex) when (ex.Result == NetcResult.ErrCorrupt)
 
 ---
 
-## 14. Build System
+## 13. Build System
 
-### 14.1 Project Structure
+### 13.1 Project Structure
 
 ```
 sdk/csharp/
-├── Netc.Core/                  # Core C# wrapper (no Unity/Godot deps)
+├── Netc.Core/                  # Core C# wrapper (no Unity deps)
 │   ├── Netc.Core.csproj
 │   ├── NetcDict.cs
 │   ├── NetcContext.cs
@@ -552,12 +494,10 @@ sdk/csharp/
 │   ├── NetcMirrorTransport.cs
 │   ├── NetcFishNetTransport.cs
 │   └── NetcManager.cs
-└── Netc.Godot/                 # Godot-specific adapters
-    ├── Netc.Godot.csproj
-    └── NetcMultiplayerPeer.cs
+└── tests/                      # xUnit test projects
 ```
 
-### 14.2 P/Invoke Declarations
+### 13.2 P/Invoke Declarations
 
 ```csharp
 internal static class NetcNative
@@ -586,7 +526,7 @@ internal static class NetcNative
 }
 ```
 
-### 14.3 CMake Integration
+### 13.3 CMake Integration
 
 The C# SDK build is driven by CMake:
 
@@ -599,9 +539,9 @@ This produces the native shared library in `sdk/csharp/Netc.Core/Native/Plugins/
 
 ---
 
-## 15. Testing
+## 14. Testing
 
-### 15.1 Test Projects
+### 14.1 Test Projects
 
 ```
 sdk/csharp/
@@ -619,11 +559,11 @@ sdk/csharp/
         └── MirrorTransportTests.cs
 ```
 
-### 15.2 Coverage Requirement
+### 14.2 Coverage Requirement
 
 Test coverage must be ≥ 95% on `Netc.Core` (measured with Coverlet). The CI pipeline enforces this threshold.
 
-### 15.3 Zero-GC Verification
+### 14.3 Zero-GC Verification
 
 ```csharp
 [Fact]
@@ -639,4 +579,4 @@ public void Compress_Span_ZeroAllocations()
 
 ---
 
-*End of C# SDK specification*
+*End of C# SDK (Unity) specification. See [sdk-godot.md](sdk-godot.md) for the Godot 4 GDExtension SDK.*

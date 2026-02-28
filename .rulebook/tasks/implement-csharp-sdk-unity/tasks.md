@@ -17,20 +17,14 @@
 - [ ] 3.4 Write Unity PlayMode tests for each transport adapter (compress/decompress round-trip)
 - [ ] 3.5 Write Unity package.json and asmdef files for UPM distribution
 
-## 4. Godot 4 Adapter
-- [ ] 4.1 Implement NetcMultiplayerPeer (extends MultiplayerPeerExtension via GDExtension C# binding)
-- [ ] 4.2 Wrap ENetMultiplayerPeer with transparent netc compression/decompression
-- [ ] 4.3 Write GDScript test scene: server + client, verify packets arrive correctly compressed
-- [ ] 4.4 Write Godot export configuration for all target platforms
+## 4. Native Binary Packaging
+- [ ] 4.1 CMake cross-compile targets: Win64, Linux x86_64, macOS ARM64
+- [ ] 4.2 Android NDK build: arm64-v8a (with NEON), x86_64
+- [ ] 4.3 iOS static library: arm64
+- [ ] 4.4 CI: build all native binaries and publish to GitHub Releases as artifacts
+- [ ] 4.5 Write NuGet .csproj package descriptor with native binary bundling per RID
 
-## 5. Native Binary Packaging
-- [ ] 5.1 CMake cross-compile targets: Win64, Linux x86_64, macOS ARM64
-- [ ] 5.2 Android NDK build: arm64-v8a (with NEON), x86_64
-- [ ] 5.3 iOS static library: arm64
-- [ ] 5.4 CI: build all native binaries and publish to GitHub Releases as artifacts
-- [ ] 5.5 Write NuGet .csproj package descriptor with native binary bundling per RID
-
-## 6. Documentation
-- [ ] 6.1 Write docs/sdk-csharp.md (P/Invoke internals, Unity quick start, Godot quick start)
-- [ ] 6.2 Write sdk/csharp/README.md (NuGet install, UPM install, Godot asset library)
-- [ ] 6.3 Update root README.md SDK section with final verified code examples
+## 5. Documentation
+- [ ] 5.1 Write docs/sdk-csharp.md (P/Invoke internals, Unity quick start)
+- [ ] 5.2 Write sdk/csharp/README.md (NuGet install, UPM install)
+- [ ] 5.3 Update root README.md SDK section with final verified code examples

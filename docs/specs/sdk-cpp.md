@@ -970,4 +970,4 @@ All tests must pass before shipping.
 
 ---
 
-*See also: [docs/specs/sdk-csharp.md](sdk-csharp.md) — C# SDK for Unity and Godot 4*
+*See also: [docs/specs/sdk-csharp.md](sdk-csharp.md) — C# SDK for Unity | [docs/specs/sdk-godot.md](sdk-godot.md) — GDExtension SDK for Godot 4*

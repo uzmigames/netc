@@ -1,4 +1,4 @@
-# Spec: C# SDK — Unity and Godot 4
+# Spec: C# SDK — Unity
 
 ## ADDED Requirements
 
@@ -55,16 +55,6 @@ Given a Mirror NetworkMessage containing random bytes
 When the transport compresses it
 Then the passthrough flag SHALL be set (netc guarantee)
 And the received payload SHALL be identical to the original
-
-### Requirement: Godot MultiplayerPeer Adapter
-NetcMultiplayerPeer SHALL implement Godot's MultiplayerPeerExtension interface and compress all packets transparently.
-
-#### Scenario: Godot RPC round-trip
-Given a Godot scene with two nodes using NetcMultiplayerPeer
-When an RPC is called with a Variant payload
-Then the packet SHALL be compressed by the sending peer
-And decompressed by the receiving peer
-And the Variant value SHALL be identical on both sides
 
 ### Requirement: Mobile Platform Support
 The native library SHALL be available and functional on Android (arm64-v8a) and iOS (arm64).

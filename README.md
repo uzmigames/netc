@@ -377,7 +377,8 @@ netc/
 | ARM NEON SIMD | Planned |
 | Profile-Guided Optimization (PGO) | Evaluated (+2-4% Clang, inconsistent GCC) |
 | C++ SDK (Unreal Engine 5) | Planned |
-| C# SDK (Unity / Godot 4) | Planned |
+| C# SDK (Unity) | Planned |
+| GDExtension (Godot 4, C++) | Planned |
 | v0.1.0 release tag | Pending |
 
 ---
