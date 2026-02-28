@@ -20,7 +20,7 @@
 - **Multi-codec competition** — tANS vs LZ77 vs RLE vs passthrough per packet, smallest wins
 - **Dictionary training** — train from packet corpus, freeze for hot-path. v5 format with LZP + 8-class trained bigram tables
 - **Stateful & stateless modes** — ring buffer history (TCP) or self-contained per-packet (UDP)
-- **SIMD acceleration** — SSE4.2 and AVX2 (x86) with runtime dispatch, generic scalar fallback
+- **SIMD acceleration** — SSE4.2 and AVX2 (x86) with runtime dispatch, generic scalar fallback. `netc_ctx_simd_level(ctx)` reports the resolved level; dict training also uses SIMD freq_count dispatch
 - **Zero dynamic allocation in hot path** — pre-allocated arena, deterministic latency
 - **Passthrough guarantee** — never expands payload; activates automatically on incompressible data
 - **Security hardened** — bounds-checked decompressor, CRC32 dictionary validation, fuzz tested
@@ -197,6 +197,19 @@ netc_compress_stateless(dict, src, src_size, dst, sizeof(dst), &dst_size);
 netc_decompress_stateless(dict, dst, dst_size, recovered, sizeof(recovered), &recovered_size);
 ```
 
+### Query the Active SIMD Level
+
+```c
+#include "netc.h"
+
+netc_cfg_t cfg = { .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA };
+netc_ctx_t *ctx = netc_ctx_create(dict, &cfg);
+
+/* Returns 1=generic, 2=sse42, 3=avx2, 4=neon. Never 0 for a valid ctx. */
+uint8_t level = netc_ctx_simd_level(ctx);
+printf("SIMD: %u\n", level);  /* e.g. 3 on an AVX2 machine */
+```
+
 ### Speed Mode (`NETC_CFG_FLAG_FAST_COMPRESS`)
 
 For latency-sensitive workloads where throughput matters more than optimal ratio:
@@ -329,6 +342,7 @@ netc/
 | Bigram context model (8-class trained) | Done |
 | Compact packet header | Done |
 | SIMD (SSE4.2, AVX2) | Done |
+| SIMD bench reporting + dict freq dispatch (`netc_ctx_simd_level`, `netc_simd_level_name`) | Done |
 | Security hardening + fuzz | Done |
 | Benchmark harness | Done |
 | Compress throughput optimization (1.4-1.9× normal, `FAST_COMPRESS` for +8-62%) | Done |

@@ -29,6 +29,11 @@ OodleNetwork is the **definition of done**: netc is considered functionally comp
 7. [Benchmark Harness Specification](#7-benchmark-harness-specification)
 8. [CI Integration](#8-ci-integration)
 9. [Profiling Requirements](#9-profiling-requirements)
+10. [Throughput Optimization Implementation Notes](#10-throughput-optimization-implementation-notes)
+    - [10.1 Phase 1+2 Results](#101-phase-12-results-windows-x86_64-msvc-o2-compact-header--delta--dict)
+    - [10.2 Speed Mode (FAST_COMPRESS)](#102-speed-mode-netc_cfg_flag_fast_compress-bit-8)
+    - [10.3 SIMD Dispatch Fixes](#103-simd-dispatch-fixes-fix-simd-reporting-and-freq-dispatch)
+    - [10.4 Gap to Hard Requirements](#104-gap-to-section-11-hard-requirements)
 
 ---
 
@@ -659,7 +664,36 @@ Speed mode disables:
 
 Bench CLI: add `--fast` to any benchmark invocation to enable speed mode.
 
-### 10.3 Gap to Section 1.1 Hard Requirements
+### 10.3 SIMD Dispatch Fixes (`fix-simd-reporting-and-freq-dispatch`)
+
+Two SIMD bugs were found and corrected:
+
+**Bug 1 — Bench always showed `simd=0`**
+
+`bench_netc_init()` built the compressor name string _before_ creating the context pair,
+so `netc_ctx_simd_level()` read the raw `cfg.simd_level` (0 for auto) rather than the
+resolved level. Fixed by creating the context pair first. Bench output now shows the
+actual runtime level (`simd=sse42`, `simd=avx2`, etc.).
+
+New public API:
+
+| Symbol | Location | Description |
+|--------|----------|-------------|
+| `netc_ctx_simd_level(ctx)` | `include/netc.h` | Returns resolved SIMD level (1-4). Never 0 for a valid context. |
+| `netc_simd_level_name(level)` | `src/simd/netc_simd.h` | Maps `uint8_t` level → C string (`"generic"`, `"sse42"`, ...). |
+
+**Bug 2 — `netc_dict_train()` used a scalar freq loop despite SIMD dispatch**
+
+The byte-frequency loop in dictionary training (`for each packet, for each byte, raw[b][pkt[i]]++`)
+was plain scalar with no SIMD acceleration, ignoring the `netc_simd_ops_t` dispatch table.
+
+Fixed by iterating over the same bucket boundaries (`bucket_end[16]`) used by `netc_ctx_bucket()`,
+calling `simd_ops.freq_count(seg, seg_len, tmp_freq)` for each segment, then promoting `uint32_t
+tmp_freq[256]` into `uint64_t raw[b][256]`. On x86 with AVX2, this path processes 32 bytes/cycle
+vs. the prior 1 byte/cycle scalar loop — training throughput improvement is proportional to
+average packet size.
+
+### 10.4 Gap to Section 1.1 Hard Requirements
 
 Current measured throughput on development hardware (Windows MSVC) is 40-120 MB/s vs the ≥ 2 GB/s
 target in §1.1. The gap is primarily platform and architecture:

@@ -11,6 +11,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 
+- **`netc_ctx_simd_level(ctx)`** — new public API function returning the actual runtime-detected SIMD level (1=generic, 2=sse42, 3=avx2, 4=neon). Independent of `cfg.simd_level` (0 = auto-detect); the returned value is always resolved. Returns 0 for `NULL`. Declared in `netc.h`, implemented in `src/core/netc_ctx.c`.
+- **`netc_simd_level_name(level)`** — new `static inline` helper in `src/simd/netc_simd.h` mapping a `uint8_t` SIMD level to a human-readable C string (`"generic"`, `"sse42"`, `"avx2"`, `"neon"`). Used by bench output and available to embedders.
+
 - **Compress throughput optimizations** — `optimize-compress-throughput` task, Phase 1+2+3:
   - **Phase 1 — SKIP_SR optimization** (`NETC_INTERNAL_SKIP_SR`): When input bytes are pre-filtered (delta residuals or LZP XOR output), PCTX (per-position tables) always dominates single-region tables. Skipping the single-region trial saves 4-10 encode passes per packet. Enables `NETC_CFG_FLAG_DELTA` and LZP paths to skip 8-16 redundant trial encodes. **Result: 1.35-1.9× throughput gain, 0% ratio regression.**
   - **Phase 1 — Bucket LUT** (`netc_tans.h`): Replaced 16-branch `netc_ctx_bucket()` ladder with a 256-byte lookup table. Eliminates ~16 branch misses per multi-bucket packet in PCTX encode loop.
