@@ -106,6 +106,8 @@ struct netc_ctx {
     /* --- Delta prediction state (stateful mode) --- */
     uint8_t           *prev_pkt;      /* Copy of last packet before delta (for encoder/decoder symmetry) */
     size_t             prev_pkt_size; /* Size of bytes valid in prev_pkt (0 = no prior packet) */
+    uint8_t           *prev2_pkt;     /* Copy of packet before prev (order-2 delta, NULL if not adaptive) */
+    size_t             prev2_pkt_size; /* Size of bytes valid in prev2_pkt (0 = no prior-prior packet) */
 
     /* --- Sequence counter for stateless delta --- */
     uint8_t            context_seq;   /* Rolling 8-bit counter (RFC-001 §9.1) */
@@ -121,6 +123,7 @@ struct netc_ctx {
     uint32_t          *adapt_freq;       /* [NETC_CTX_COUNT][256] frequency accumulators (NULL if not adaptive) */
     uint32_t          *adapt_total;      /* [NETC_CTX_COUNT] total byte count per bucket */
     netc_tans_table_t *adapt_tables;     /* [NETC_CTX_COUNT] mutable tANS tables (NULL if not adaptive) */
+    netc_lzp_entry_t  *adapt_lzp;       /* Mutable LZP table (NULL if not adaptive or no LZP in dict) */
     uint32_t           adapt_pkt_count;  /* Packets processed since last table rebuild */
 };
 
@@ -459,7 +462,13 @@ static const netc_pkt_type_entry_t netc_pkt_type_table[256] = {
     [0xD2] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
     [0xD3] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
 
-    /* 0xD4-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
+    /* 0xD4-0xD7: PCTX + DELTA2 (order-2 delta) variants */
+    [0xD4] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_RLE | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX },
+    [0xD5] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_RLE | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
+    [0xD6] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_RLE | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX },
+    [0xD7] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_RLE | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
+
+    /* 0xD8-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
     /* 0xFF: legacy sentinel */
     [0xFF] = { 0xFF, 0xFF },
 };
@@ -483,7 +492,12 @@ static NETC_INLINE uint8_t netc_compact_type_encode(uint8_t flags, uint8_t algor
 
     /* PCTX */
     if (alg_lo == NETC_ALG_TANS_PCTX) {
-        uint8_t lzp = (bucket != 0) ? 1u : 0u; /* high nibble signals LZP */
+        uint8_t lzp    = (bucket != 0) ? 1u : 0u; /* high nibble signals LZP */
+        uint8_t delta2 = (flags & NETC_PKT_FLAG_RLE) ? 1u : 0u; /* RLE reused as order-2 delta signal */
+        if (delta2) {
+            /* 0xD4-0xD7: order-2 delta PCTX variants */
+            return (uint8_t)(0xD4u + lzp + bigram * 2u);
+        }
         if (bigram) return (uint8_t)(0xD0u + delta + lzp * 2u);
         return (uint8_t)(0x04u + delta + lzp * 2u);
     }
@@ -595,6 +609,12 @@ static NETC_INLINE size_t netc_hdr_emit(void *dst,
  * mutable adaptive tables. Otherwise returns the frozen dict tables. */
 static NETC_INLINE const netc_tans_table_t *netc_get_tables(const netc_ctx_t *ctx) {
     return (ctx->adapt_tables != NULL) ? ctx->adapt_tables : ctx->dict->tables;
+}
+
+/* Return the adaptive LZP table if available, otherwise the frozen dict LZP table. */
+static NETC_INLINE const netc_lzp_entry_t *netc_get_lzp_table(const netc_ctx_t *ctx) {
+    if (ctx->adapt_lzp != NULL) return ctx->adapt_lzp;
+    return (ctx->dict != NULL) ? ctx->dict->lzp_table : NULL;
 }
 
 #endif /* NETC_INTERNAL_H */

@@ -246,4 +246,55 @@ static NETC_INLINE void netc_lzp_xor_unfilter(
     }
 }
 
+/* =========================================================================
+ * LZP adaptive update (miss-driven)
+ *
+ * After each packet, scans through the raw bytes and updates the mutable
+ * LZP hash table on prediction misses.  When the table's prediction for
+ * context (prev_byte, position) doesn't match the actual byte, overwrite
+ * it.  This lets the LZP table learn actual per-position byte patterns
+ * from the live connection, improving prediction hit rate over time.
+ *
+ * Called identically on both encoder and decoder with the same raw bytes,
+ * keeping the tables in sync without any wire overhead.
+ * ========================================================================= */
+
+static NETC_INLINE void netc_lzp_adaptive_update(
+    netc_lzp_entry_t *lzp_table,
+    const uint8_t    *data,
+    size_t            data_size)
+{
+    if (!lzp_table || !data || data_size == 0) return;
+
+    for (size_t i = 0; i < data_size; i++) {
+        uint8_t prev = (i > 0) ? data[i - 1] : 0x00u;
+        uint32_t h = netc_lzp_hash(prev, (uint32_t)i);
+
+        if (!lzp_table[h].valid) {
+            /* Empty slot — fill with observed byte */
+            lzp_table[h].value = data[i];
+            lzp_table[h].valid = 1;
+        } else if (lzp_table[h].value != data[i]) {
+            /* Prediction miss on a trained slot.  Use a lightweight
+             * exponential-decay replacement: the `valid` field doubles
+             * as a confidence counter (1-255).  On miss, decrement;
+             * when it reaches 0, overwrite with the new value.  On hit,
+             * saturating-increment toward 255.  This prevents thrashing
+             * from hash collisions while still adapting to distribution
+             * shifts over many packets. */
+            if (lzp_table[h].valid > 1) {
+                lzp_table[h].valid--;
+            } else {
+                /* Confidence depleted — replace prediction */
+                lzp_table[h].value = data[i];
+                lzp_table[h].valid = 1;
+            }
+        } else {
+            /* Hit — boost confidence (saturating increment) */
+            if (lzp_table[h].valid < 255)
+                lzp_table[h].valid++;
+        }
+    }
+}
+
 #endif /* NETC_LZP_H */

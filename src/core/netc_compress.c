@@ -54,6 +54,23 @@ NETC_MAYBE_UNUSED static NETC_INLINE uint32_t ring_ht_hash3(const uint8_t *p)
 }
 
 /* =========================================================================
+ * Internal: rotate prev2/prev packet history for delta prediction
+ * ========================================================================= */
+static void compress_update_prev(netc_ctx_t *ctx,
+                                  const void *src, size_t src_size)
+{
+    if (ctx->prev_pkt != NULL) {
+        /* Rotate: prev2 = prev, prev = current (before overwriting prev) */
+        if (ctx->prev2_pkt != NULL) {
+            memcpy(ctx->prev2_pkt, ctx->prev_pkt, ctx->prev_pkt_size);
+            ctx->prev2_pkt_size = ctx->prev_pkt_size;
+        }
+        memcpy(ctx->prev_pkt, src, src_size);
+        ctx->prev_pkt_size = src_size;
+    }
+}
+
+/* =========================================================================
  * Internal: append raw bytes to the context's ring buffer (circular)
  * ========================================================================= */
 static void ctx_ring_append(netc_ctx_t *ctx,
@@ -738,8 +755,14 @@ static int try_tans_compress(
                 if ((ctx_flags & NETC_CFG_FLAG_BIGRAM) &&
                     dict->bigram_tables[0][0].valid)
                 {
+                    /* Trial buffer: encode bigram separately so we never
+                     * clobber the unigram bitstream already in dst. */
+                    uint8_t bg_trial[NETC_MAX_PACKET_SIZE + 64];
+                    size_t bg_cap = dst_payload_cap - state_sz;
+                    if (bg_cap > sizeof(bg_trial)) bg_cap = sizeof(bg_trial);
+
                     netc_bsw_t bsw_bg;
-                    netc_bsw_init(&bsw_bg, dst + state_sz, dst_payload_cap - state_sz);
+                    netc_bsw_init(&bsw_bg, bg_trial, bg_cap);
 
                     uint32_t bg_state = netc_tans_encode_pctx_bigram(
                         dict->bigram_tables, tables, dict->bigram_class_map,
@@ -750,21 +773,14 @@ static int try_tans_compress(
                         if (bg_bs != (size_t)-1) {
                             size_t bg_total = state_sz + bg_bs;
                             if (bg_total < pctx_total) {
-                                /* Bigram-PCTX wins -- dst already has the bigram bitstream */
+                                /* Bigram-PCTX wins -- copy to dst */
+                                memcpy(dst + state_sz, bg_trial, bg_bs);
                                 pctx_total    = bg_total;
                                 pctx_state    = bg_state;
                                 pctx_is_bigram = 1;
-                            } else {
-                                /* Unigram PCTX wins -- re-encode unigram into dst
-                                 * (bigram trial clobbered it) */
-                                netc_bsw_t bsw_re;
-                                netc_bsw_init(&bsw_re, dst + state_sz,
-                                              dst_payload_cap - state_sz);
-                                pctx_state = netc_tans_encode_pctx(
-                                    tables, src, src_size,
-                                    &bsw_re, NETC_TANS_TABLE_SIZE);
-                                netc_bsw_flush(&bsw_re);
                             }
+                            /* Unigram wins: dst already has the correct bitstream,
+                             * no re-encode needed. */
                         }
                     }
                 }
@@ -808,7 +824,11 @@ static int try_tans_compress(
         }
     }
 
-    /* Fallback: single-region best-fit table selection */
+    /* Fallback: single-region best-fit table selection.
+     * When SKIP_SR is set (delta/LZP pre-filtered data), PCTX is the only
+     * valid output format.  If PCTX failed above, return failure so the caller
+     * can fall back to raw-tANS or passthrough (which strips the delta flag). */
+    if (ctx_flags & NETC_INTERNAL_SKIP_SR) return -1;
     return try_tans_single_region(dict, tables, src, src_size, dst, dst_payload_cap,
                                   compressed_payload_size, used_mreg_flag,
                                   used_x2_flag, out_table_idx, ctx_flags,
@@ -844,6 +864,8 @@ netc_result_t netc_compress(
     const netc_dict_t *dict = ctx->dict;
     /* Adaptive tables (when active) or frozen dict tables */
     const netc_tans_table_t *tables = (dict != NULL) ? netc_get_tables(ctx) : NULL;
+    /* Adaptive LZP table (when active) or frozen dict LZP table */
+    const netc_lzp_entry_t *lzp_table = netc_get_lzp_table(ctx);
     const int compact_mode = (ctx->flags & NETC_CFG_FLAG_COMPACT_HDR) ? 1 : 0;
     const size_t hdr_sz = compact_mode
         ? (src_size <= 127u ? NETC_COMPACT_HDR_MIN : NETC_COMPACT_HDR_MAX)
@@ -871,12 +893,34 @@ netc_result_t netc_compress(
         src_size >= NETC_DELTA_MIN_SIZE &&
         ctx->arena_size >= src_size)
     {
-        /* Encode residuals into arena via SIMD dispatch */
+        /* Encode order-1 residuals into arena via SIMD dispatch */
         ctx->simd_ops.delta_encode(ctx->prev_pkt, (const uint8_t *)src,
                                    ctx->arena, src_size);
         compress_src = ctx->arena;
         pkt_flags   |= NETC_PKT_FLAG_DELTA;
         did_delta    = 1;
+
+        /* Order-2 delta trial: when prev2 is available with matching size,
+         * try linear extrapolation prediction and use it if it produces
+         * lower-entropy residuals (more zero bytes). */
+        if (ctx->prev2_pkt != NULL &&
+            ctx->prev2_pkt_size == src_size)
+        {
+            uint8_t o2_trial[NETC_MAX_PACKET_SIZE];
+            netc_delta_encode_order2(ctx->prev2_pkt, ctx->prev_pkt,
+                                     (const uint8_t *)src, o2_trial, src_size);
+            /* Heuristic: count zero bytes — more zeros ≈ lower entropy */
+            size_t zeros_o1 = 0, zeros_o2 = 0;
+            for (size_t zi = 0; zi < src_size; zi++) {
+                if (ctx->arena[zi] == 0) zeros_o1++;
+                if (o2_trial[zi] == 0)   zeros_o2++;
+            }
+            if (zeros_o2 > zeros_o1) {
+                /* Order-2 wins — copy into arena and flag with DELTA+RLE */
+                memcpy(ctx->arena, o2_trial, src_size);
+                pkt_flags |= NETC_PKT_FLAG_RLE; /* RLE reused as order-2 signal */
+            }
+        }
     }
 
     /* LZP XOR pre-filter: when the dictionary has a trained LZP table and
@@ -884,11 +928,11 @@ netc_result_t netc_compress(
      * prediction.  Correctly-predicted bytes become 0x00, concentrating the
      * distribution for much better tANS compression.  The tANS tables in
      * the dictionary were retrained on LZP-filtered data during training. */
-    if (!did_delta && dict != NULL && dict->lzp_table != NULL &&
+    if (!did_delta && dict != NULL && lzp_table != NULL &&
         ctx->arena_size >= src_size)
     {
         netc_lzp_xor_filter((const uint8_t *)src, src_size,
-                            dict->lzp_table, ctx->arena);
+                            lzp_table, ctx->arena);
         compress_src = ctx->arena;
         did_lzp      = 1;
     }
@@ -936,13 +980,13 @@ netc_result_t netc_compress(
              * unlikely to win — skip to save 1 LZP filter + 1 PCTX encode.
              * For ≤256B packets LZP is kept unconditional (predictions accurate
              * at short range; WL-001/002/003 depend on this for ratio). */
-            if (did_delta && dict->lzp_table != NULL && src_size <= 512 &&
+            if (did_delta && lzp_table != NULL && src_size <= 512 &&
                 !(ctx->flags & NETC_CFG_FLAG_FAST_COMPRESS) &&
                 (src_size <= 256u || compressed_payload >= (src_size >> 1))) {
                 uint8_t lzp_trial_src[512];
                 uint8_t lzp_trial_dst[520];
                 netc_lzp_xor_filter((const uint8_t *)src, src_size,
-                                    dict->lzp_table, lzp_trial_src);
+                                    lzp_table, lzp_trial_src);
 
                 size_t  lzp_cp = 0;
                 int     lzp_mreg = 0, lzp_x2 = 0;
@@ -967,7 +1011,7 @@ netc_result_t netc_compress(
                     used_mreg = lzp_mreg;
                     used_x2   = lzp_x2;
                     tbl_idx   = lzp_tbl;
-                    pkt_flags &= ~(uint8_t)NETC_PKT_FLAG_DELTA;
+                    pkt_flags &= ~(uint8_t)(NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_RLE);
                     did_delta  = 0;
                     did_lzp    = 1;
                     tans_ctx_flags = lzp_ctx; /* match the trial encoding flags */
@@ -1014,10 +1058,7 @@ netc_result_t netc_compress(
                         netc_hdr_emit(dst, &hdr, compact_mode);
                         *dst_size = hdr_sz + lz_len;
                         ctx_ring_append(ctx, (const uint8_t *)src, src_size);
-                        if (ctx->prev_pkt != NULL) {
-                            memcpy(ctx->prev_pkt, src, src_size);
-                            ctx->prev_pkt_size = src_size;
-                        }
+                        compress_update_prev(ctx, src, src_size);
                         if (ctx->flags & NETC_CFG_FLAG_STATS) {
                             ctx->stats.packets_compressed++;
                             ctx->stats.bytes_in  += src_size;
@@ -1025,11 +1066,15 @@ netc_result_t netc_compress(
                             ctx->stats.passthrough_count++;
                         }
                         netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+                        netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
                     /* LZ77 didn't beat tANS -- tANS payload in dst is still valid */
-                } else if (did_delta && src_size <= 1024) {
+                } else if (did_delta && src_size <= 1024 &&
+                           !(pkt_flags & NETC_PKT_FLAG_RLE)) {
                     /* Case B: arena holds delta residuals, so we can't use it for LZ77.
+                     * Skip for order-2 delta (RLE flag): passthrough compact types
+                     * can't carry the order-2 signal and would decode incorrectly.
                      * Quick redundancy check: count distinct byte values in the first
                      * 32 bytes.  ≤ 4 distinct values → runs/periodic patterns that LZ77
                      * compresses well.  > 4 → diverse residuals (game-state WL-001/002/003)
@@ -1077,10 +1122,7 @@ netc_result_t netc_compress(
                         netc_hdr_emit(dst, &hdr, compact_mode);
                         *dst_size = hdr_sz + lz_len;
                         ctx_ring_append(ctx, (const uint8_t *)src, src_size);
-                        if (ctx->prev_pkt != NULL) {
-                            memcpy(ctx->prev_pkt, src, src_size);
-                            ctx->prev_pkt_size = src_size;
-                        }
+                        compress_update_prev(ctx, src, src_size);
                         if (ctx->flags & NETC_CFG_FLAG_STATS) {
                             ctx->stats.packets_compressed++;
                             ctx->stats.bytes_in  += src_size;
@@ -1088,6 +1130,7 @@ netc_result_t netc_compress(
                             ctx->stats.passthrough_count++;
                         }
                         netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+                        netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
                     /* LZ77 lost -- restore tANS output from stack */
@@ -1172,16 +1215,14 @@ case_b_skip:;
                         netc_hdr_emit(dst, &hdr, compact_mode);
                         *dst_size = hdr_sz + lzx_len;
                         ctx_ring_append(ctx, (const uint8_t *)src, src_size);
-                        if (ctx->prev_pkt != NULL) {
-                            memcpy(ctx->prev_pkt, src, src_size);
-                            ctx->prev_pkt_size = src_size;
-                        }
+                        compress_update_prev(ctx, src, src_size);
                         if (ctx->flags & NETC_CFG_FLAG_STATS) {
                             ctx->stats.packets_compressed++;
                             ctx->stats.bytes_in  += src_size;
                             ctx->stats.bytes_out += *dst_size;
                         }
                         netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+                        netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
                 }
@@ -1262,16 +1303,14 @@ case_b_skip:;
             netc_hdr_emit(dst, &hdr, compact_mode);
             *dst_size = hdr_sz + compressed_payload;
             ctx_ring_append(ctx, (const uint8_t *)src, src_size);
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, src, src_size);
-                ctx->prev_pkt_size = src_size;
-            }
+            compress_update_prev(ctx, src, src_size);
             if (ctx->flags & NETC_CFG_FLAG_STATS) {
                 ctx->stats.packets_compressed++;
                 ctx->stats.bytes_in  += src_size;
                 ctx->stats.bytes_out += *dst_size;
             }
             netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
             return NETC_OK;
         }
     }
@@ -1293,9 +1332,9 @@ case_b_skip:;
          * no longer needed in this fallback path). */
         const uint8_t *raw_src = (const uint8_t *)src;
         int fallback_lzp = 0;
-        if (dict->lzp_table != NULL && ctx->arena_size >= src_size) {
+        if (lzp_table != NULL && ctx->arena_size >= src_size) {
             netc_lzp_xor_filter((const uint8_t *)src, src_size,
-                                dict->lzp_table, ctx->arena);
+                                lzp_table, ctx->arena);
             raw_src = ctx->arena;
             fallback_lzp = 1;
             /* Suppress X2 for LZP compact (no LZP+X2 type).
@@ -1367,16 +1406,14 @@ case_b_skip:;
                         netc_hdr_emit(dst, &hdr, compact_mode);
                         *dst_size = hdr_sz + lzx_len;
                         ctx_ring_append(ctx, (const uint8_t *)src, src_size);
-                        if (ctx->prev_pkt != NULL) {
-                            memcpy(ctx->prev_pkt, src, src_size);
-                            ctx->prev_pkt_size = src_size;
-                        }
+                        compress_update_prev(ctx, src, src_size);
                         if (ctx->flags & NETC_CFG_FLAG_STATS) {
                             ctx->stats.packets_compressed++;
                             ctx->stats.bytes_in  += src_size;
                             ctx->stats.bytes_out += *dst_size;
                         }
                         netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+                        netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
                         return NETC_OK;
                     }
                 }
@@ -1436,16 +1473,14 @@ case_b_skip:;
             netc_hdr_emit(dst, &hdr, compact_mode);
             *dst_size = hdr_sz + raw_payload;
             ctx_ring_append(ctx, (const uint8_t *)src, src_size);
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, src, src_size);
-                ctx->prev_pkt_size = src_size;
-            }
+            compress_update_prev(ctx, src, src_size);
             if (ctx->flags & NETC_CFG_FLAG_STATS) {
                 ctx->stats.packets_compressed++;
                 ctx->stats.bytes_in  += src_size;
                 ctx->stats.bytes_out += *dst_size;
             }
             netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
             return NETC_OK;
         }
     }
@@ -1456,11 +1491,11 @@ case_b_skip:;
      * netc_lzp_xor_filter.  compress_src still points to the arena but its
      * content is no longer delta residuals.  Reset to use raw src bytes and
      * clear the DELTA flag so LZ77/passthrough don't assume delta encoding. */
-    if (did_delta && dict != NULL && dict->lzp_table != NULL &&
+    if (did_delta && dict != NULL && lzp_table != NULL &&
         ctx->arena_size >= src_size)
     {
         compress_src = (const uint8_t *)src;
-        pkt_flags   &= ~(uint8_t)NETC_PKT_FLAG_DELTA;
+        pkt_flags   &= ~(uint8_t)(NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_RLE);
         did_delta    = 0;
     }
 
@@ -1534,10 +1569,7 @@ case_b_skip:;
              * since we always encode raw src (not residuals) for LZ77X. */
             ctx_ring_append(ctx, (const uint8_t *)src, src_size);
 
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, src, src_size);
-                ctx->prev_pkt_size = src_size;
-            }
+            compress_update_prev(ctx, src, src_size);
             if (ctx->flags & NETC_CFG_FLAG_STATS) {
                 ctx->stats.packets_compressed++;
                 ctx->stats.bytes_in  += src_size;
@@ -1545,6 +1577,7 @@ case_b_skip:;
                 ctx->stats.passthrough_count++;
             }
             netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
             return NETC_OK;
         }
     }
@@ -1552,10 +1585,7 @@ case_b_skip:;
 lz77_failed:
     /* If we ran delta but neither tANS nor LZ77 compressed, update prev_pkt. */
     (void)did_delta;
-    if (ctx->prev_pkt != NULL) {
-        memcpy(ctx->prev_pkt, src, src_size);
-        ctx->prev_pkt_size = src_size;
-    }
+    compress_update_prev(ctx, src, src_size);
     /* Ring buffer update even for passthrough — decoder always has original bytes */
     ctx_ring_append(ctx, (const uint8_t *)src, src_size);
 
@@ -1563,8 +1593,10 @@ lz77_failed:
     {
         netc_result_t pt_r = emit_passthrough(ctx, dict, src, src_size, dst, dst_cap,
                                                dst_size, seq, compact_mode);
-        if (pt_r == NETC_OK)
+        if (pt_r == NETC_OK) {
             netc_adaptive_update(ctx, (const uint8_t *)src, src_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)src, src_size);
+        }
         return pt_r;
     }
 }

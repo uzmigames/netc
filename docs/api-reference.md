@@ -103,6 +103,8 @@ Passed to `netc_ctx_create` via `netc_cfg_t.flags`.
 | `NETC_CFG_FLAG_BIGRAM`      | `0x08` | Enable bigram context model |
 | `NETC_CFG_FLAG_STATS`       | `0x10` | Enable statistics collection |
 | `NETC_CFG_FLAG_COMPACT_HDR` | `0x20` | Use compact 2-4B packet header (see RFC-001 §9.1a). Must be set on both compressor and decompressor contexts. Also enables ANS state compaction (2B instead of 4B). |
+| `NETC_CFG_FLAG_FAST_COMPRESS` | `0x100` | Speed mode: skip trial passes for ~2-5% ratio cost, 8-62% throughput gain. Decompressor does not need this flag. |
+| `NETC_CFG_FLAG_ADAPTIVE` | `0x200` | Enable adaptive cross-packet learning. Requires `STATEFUL`. Adapts tANS frequency tables (rebuilt every 128 packets), LZP hash predictions, and delta prediction order (order-2 when beneficial) to the live data stream. Both encoder and decoder must set this flag. Context memory ~1 MB with all features enabled. |
 
 ---
 

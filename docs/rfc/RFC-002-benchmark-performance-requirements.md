@@ -34,7 +34,8 @@ OodleNetwork is the **definition of done**: netc is considered functionally comp
     - [10.2 Speed Mode (FAST_COMPRESS)](#102-speed-mode-netc_cfg_flag_fast_compress-bit-8)
     - [10.3 SIMD Dispatch Fixes](#103-simd-dispatch-fixes-fix-simd-reporting-and-freq-dispatch)
     - [10.4 Compression Ratio Measurements](#104-compression-ratio-measurements-improve-compression-ratio-phase1)
-    - [10.5 Gap to Hard Requirements](#105-gap-to-section-11-hard-requirements)
+    - [10.5 Adaptive Cross-Packet Learning](#105-adaptive-cross-packet-learning-implement-adaptive-cross-packet-learning)
+    - [10.6 Gap to Hard Requirements](#106-gap-to-section-11-hard-requirements)
 
 ---
 
@@ -738,7 +739,43 @@ PCTX+LZP+BIGRAM, PCTX+LZP+BIGRAM+DELTA).
 workloads (WL-001 through WL-005). Oodle TCP remains ahead on WL-004 32B (0.572) and
 WL-005 512B (0.415) due to stateful cross-packet learning.
 
-### 10.5 Gap to Section 1.1 Hard Requirements
+### 10.5 Adaptive Cross-Packet Learning (`implement-adaptive-cross-packet-learning`)
+
+Measured on Windows x86_64, MSVC `/O2`, compact header + delta + dict + adaptive, seed=42,
+count=50000.
+
+#### Adaptive vs Static Ratio Comparison
+
+| Workload | Static | Adaptive | Delta | Notes |
+|----------|:------:|:--------:|:-----:|-------|
+| WL-004 32B | 0.647 | **0.626** | **-3.2%** | Monotonic counters benefit from order-2 |
+| WL-001 64B | **0.758** | 0.783 | +3.3% | PRNG stationary — adaptive overhead |
+| WL-002 128B | **0.572** | 0.589 | +3.0% | Same — dict already optimal |
+| WL-003 256B | **0.331** | 0.343 | +3.5% | Same |
+| WL-005 512B | 0.437 | **0.435** | **-0.6%** | Slight improvement |
+| WL-006 Random | 1.031 | 1.031 | 0% | Incompressible |
+| WL-007 Repetitive | 0.072 | 0.072 | 0% | Already near-optimal |
+| WL-008 Mixed | 0.650 | 0.651 | +0.2% | Neutral |
+
+**Key findings:**
+- Adaptive mode shows mixed results on PRNG-based synthetic workloads because the training
+  corpus already captures the stationary byte distribution perfectly.
+- Adaptive mode is designed for real game connections where byte distributions shift over time
+  (player state changes, map transitions, game phase changes).
+- Order-2 delta prediction improves WL-004 (financial ticks with monotonic counters) by 3.2%.
+- Throughput overhead: ~30-40% slower compress, ~40-50% slower decompress (table rebuild +
+  LZP updates + freq tracking). This is the expected cost of online learning.
+- Context memory: ~1020 KB with all phases (tANS tables dominate at 424 KB).
+
+**Phases implemented:**
+1. Adaptive tANS frequency tables — blend 3/4 accumulated + 1/4 dict baseline every 128 packets
+2. Adaptive LZP hash updates — confidence-based decay on per-connection LZP table
+3. Order-2 delta — linear extrapolation `2*prev - prev2`, auto-selected when residuals improve
+
+**Sustained simulation:** 10,000 packets of 32-512B with shifting distributions — 100% round-trip
+fidelity across 78 table rebuilds. Encoder and decoder tables remain perfectly in sync.
+
+### 10.6 Gap to Section 1.1 Hard Requirements
 
 Current measured throughput on development hardware (Windows MSVC) is 40-120 MB/s vs the ≥ 2 GB/s
 target in §1.1. The gap is primarily platform and architecture:

@@ -114,4 +114,57 @@ static NETC_INLINE size_t netc_delta_decode(
     return size;
 }
 
+/* =========================================================================
+ * netc_delta_encode_order2
+ *
+ * Order-2 delta: linear extrapolation prediction.
+ *   predicted[i] = 2*prev[i] - prev2[i]  (clamped to uint8_t via wrapping)
+ *   residual[i]  = curr[i] - predicted[i] (XOR or SUB per field class)
+ *
+ * This captures linear trends (e.g. monotonic counters, smooth position
+ * changes) more accurately than order-1, producing smaller residuals.
+ * ========================================================================= */
+static NETC_INLINE size_t netc_delta_encode_order2(
+    const uint8_t *prev2,
+    const uint8_t *prev,
+    const uint8_t *curr,
+    uint8_t       *residual,
+    size_t         size)
+{
+    for (size_t i = 0; i < size; i++) {
+        uint8_t predicted = (uint8_t)(2U * prev[i] - prev2[i]);
+        if (i < NETC_DELTA_HEADER_END || (i >= NETC_DELTA_SUBHEADER_END && i < NETC_DELTA_BODY_END)) {
+            residual[i] = curr[i] ^ predicted;
+        } else {
+            residual[i] = (uint8_t)(curr[i] - predicted);
+        }
+    }
+    return size;
+}
+
+/* =========================================================================
+ * netc_delta_decode_order2
+ *
+ * Inverse of netc_delta_encode_order2.
+ *   predicted[i] = 2*prev[i] - prev2[i]
+ *   curr[i]      = residual[i] + predicted[i] (XOR or ADD per field class)
+ * ========================================================================= */
+static NETC_INLINE size_t netc_delta_decode_order2(
+    const uint8_t *prev2,
+    const uint8_t *prev,
+    const uint8_t *residual,
+    uint8_t       *curr,
+    size_t         size)
+{
+    for (size_t i = 0; i < size; i++) {
+        uint8_t predicted = (uint8_t)(2U * prev[i] - prev2[i]);
+        if (i < NETC_DELTA_HEADER_END || (i >= NETC_DELTA_SUBHEADER_END && i < NETC_DELTA_BODY_END)) {
+            curr[i] = residual[i] ^ predicted;
+        } else {
+            curr[i] = (uint8_t)(residual[i] + predicted);
+        }
+    }
+    return size;
+}
+
 #endif /* NETC_DELTA_H */

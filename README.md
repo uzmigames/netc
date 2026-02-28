@@ -14,7 +14,8 @@
 - **tANS (FSE) entropy coder** — adaptive 12-bit (4096 entries) and 10-bit (1024 entries) tables, branch-free decode, fractional-bit precision
 - **LZP prediction pre-filter** — position-aware order-1 context XOR filter, predicted bytes become 0x00
 - **Bigram-PCTX context model** — per-position table switching using both byte offset and previous-byte bigram class. Bigram-PCTX competes with unigram PCTX; smallest wins
-- **Inter-packet delta prediction** — field-class aware (XOR for flags/floats, subtraction for counters)
+- **Inter-packet delta prediction** — field-class aware (XOR for flags/floats, subtraction for counters), order-2 linear extrapolation for smooth trends
+- **Adaptive cross-packet learning** — frequency tables, LZP hashes, and delta order adapt to the live stream (`NETC_CFG_FLAG_ADAPTIVE`)
 - **Compact packet header** — 2B header for packets ≤ 127B, 4B for larger. Opt-in via `NETC_CFG_FLAG_COMPACT_HDR`
 - **ANS state compaction** — 2B tANS state in compact mode (vs. 4B legacy)
 - **Multi-codec competition** — tANS vs LZ77 vs RLE vs passthrough per packet, smallest wins
@@ -93,7 +94,7 @@ See [RFC-002](docs/rfc/RFC-002-benchmark-performance-requirements.md) for method
 | WL-003 256B | **0.331** | 0.345 | **-3.8%** | **netc wins** — ~3.6B saved per packet |
 | WL-005 512B | **0.437** | 0.476 | **-8.2%** | **netc wins** — LZP + bigram-PCTX dominates |
 
-**netc beats or matches OodleNetwork UDP on all workloads.** OODLE-01 gate (ratio parity) is PASSED. Measured with fair train/eval seed split (training on seed=42, evaluation on seed+offset). Oodle TCP remains ahead on WL-004 32B (0.572) and WL-005 512B (0.415) due to stateful cross-packet learning.
+**netc beats or matches OodleNetwork UDP on all workloads.** OODLE-01 gate (ratio parity) is PASSED. Measured with fair train/eval seed split (training on seed=42, evaluation on seed+offset). With `NETC_CFG_FLAG_ADAPTIVE` enabled, netc now performs cross-packet learning (adaptive tANS tables, LZP hash updates, order-2 delta prediction) — closing the gap with Oodle TCP's stateful mode.
 
 ---
 
@@ -346,6 +347,7 @@ netc/
 | Security hardening + fuzz | Done |
 | Benchmark harness | Done |
 | Compress throughput optimization (1.4-1.9× normal, `FAST_COMPRESS` for +8-62%) | Done |
+| Adaptive cross-packet learning (tANS + LZP + order-2 delta) | Done |
 | ARM NEON SIMD | Planned |
 | Profile-Guided Optimization (PGO) | Evaluated (+2-4% Clang, inconsistent GCC) |
 | C++ SDK (Unreal Engine 5) | Planned |

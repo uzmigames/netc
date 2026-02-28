@@ -19,6 +19,50 @@
 #include <string.h>
 
 /* =========================================================================
+ * Internal: apply delta post-pass (order-1 or order-2)
+ *
+ * When DELTA+RLE flags are both set, uses order-2 (linear extrapolation).
+ * When only DELTA is set, uses order-1 (simple difference).
+ * ========================================================================= */
+
+static void decomp_delta_postpass(netc_ctx_t *ctx, uint8_t flags,
+                                  void *dst, size_t dst_sz)
+{
+    if (!(flags & NETC_PKT_FLAG_DELTA)) return;
+    if (ctx->prev_pkt == NULL || ctx->prev_pkt_size != dst_sz) return;
+
+    if ((flags & NETC_PKT_FLAG_RLE) &&
+        ctx->prev2_pkt != NULL &&
+        ctx->prev2_pkt_size == dst_sz)
+    {
+        /* Order-2 delta: predicted = 2*prev - prev2 */
+        netc_delta_decode_order2(ctx->prev2_pkt, ctx->prev_pkt,
+                                 (const uint8_t *)dst, (uint8_t *)dst, dst_sz);
+    } else {
+        /* Order-1 delta via SIMD dispatch */
+        ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
+                                   (uint8_t *)dst, dst_sz);
+    }
+}
+
+/* =========================================================================
+ * Internal: rotate prev2/prev packet history after decode
+ * ========================================================================= */
+
+static void decomp_update_prev(netc_ctx_t *ctx, const void *dst, size_t dst_sz)
+{
+    if (ctx->prev_pkt != NULL) {
+        /* Rotate: prev2 = prev, prev = current (before overwriting prev) */
+        if (ctx->prev2_pkt != NULL) {
+            memcpy(ctx->prev2_pkt, ctx->prev_pkt, ctx->prev_pkt_size);
+            ctx->prev2_pkt_size = ctx->prev_pkt_size;
+        }
+        memcpy(ctx->prev_pkt, dst, dst_sz);
+        ctx->prev_pkt_size = dst_sz;
+    }
+}
+
+/* =========================================================================
  * Internal: validate header and src buffer bounds
  * ========================================================================= */
 
@@ -427,6 +471,8 @@ netc_result_t netc_decompress(
     const int compact_mode = (ctx->flags & NETC_CFG_FLAG_COMPACT_HDR) ? 1 : 0;
     /* Adaptive tables (when active) or frozen dict tables */
     const netc_tans_table_t *tables = (ctx->dict != NULL) ? netc_get_tables(ctx) : NULL;
+    /* Adaptive LZP table (when active) or frozen dict LZP table */
+    const netc_lzp_entry_t *lzp_table = netc_get_lzp_table(ctx);
 
     netc_pkt_header_t hdr;
     size_t pkt_hdr_sz = 0;
@@ -483,22 +529,12 @@ netc_result_t netc_decompress(
             }
             *dst_size = hdr.original_size;
 
-            /* Delta post-pass for LZ77+DELTA: dst holds residuals from LZ77
-             * decoding; reconstruct original using the prev_pkt predictor. */
-            if ((hdr.flags & (NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_LZ77)) ==
-                (NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_LZ77) &&
-                ctx->prev_pkt != NULL &&
-                ctx->prev_pkt_size == hdr.original_size)
-            {
-                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
-                                           (uint8_t *)dst, hdr.original_size);
-            }
+            /* Delta post-pass for LZ77+DELTA */
+            if (hdr.flags & NETC_PKT_FLAG_LZ77)
+                decomp_delta_postpass(ctx, hdr.flags, dst, hdr.original_size);
 
-            /* Update delta predictor with this packet's original bytes */
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, dst, hdr.original_size);
-                ctx->prev_pkt_size = hdr.original_size;
-            }
+            /* Update delta predictor (and prev2 rotation) */
+            decomp_update_prev(ctx, dst, hdr.original_size);
             /* Ring buffer update — keeps encoder/decoder history in sync */
             decomp_ring_append(ctx, (const uint8_t *)dst, hdr.original_size);
 
@@ -510,6 +546,7 @@ netc_result_t netc_decompress(
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
             netc_adaptive_update(ctx, (const uint8_t *)dst, hdr.original_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)dst, hdr.original_size);
             return NETC_OK;
         }
 
@@ -521,22 +558,11 @@ netc_result_t netc_decompress(
                             scratch, scratch_cap, compact_mode);
             if (r != NETC_OK) return r;
 
-            /* Phase 3: Delta post-pass — undo delta encoding if flag is set */
-            if ((hdr.flags & NETC_PKT_FLAG_DELTA) &&
-                ctx->prev_pkt != NULL &&
-                ctx->prev_pkt_size == *dst_size)
-            {
-                /* dst currently holds residuals; reconstruct original in-place
-                 * via SIMD dispatch */
-                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
-                                           (uint8_t *)dst, *dst_size);
-            }
+            /* Delta post-pass (order-1 or order-2) */
+            decomp_delta_postpass(ctx, hdr.flags, dst, *dst_size);
 
-            /* Update delta predictor with reconstructed original bytes */
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, dst, *dst_size);
-                ctx->prev_pkt_size = *dst_size;
-            }
+            /* Update delta predictor (and prev2 rotation) */
+            decomp_update_prev(ctx, dst, *dst_size);
             /* Ring buffer update */
             decomp_ring_append(ctx, (const uint8_t *)dst, *dst_size);
 
@@ -547,6 +573,7 @@ netc_result_t netc_decompress(
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
             netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -590,26 +617,17 @@ netc_result_t netc_decompress(
             /* LZP XOR inverse: upper nibble of algorithm byte signals LZP
              * was applied as a pre-filter before PCTX encoding. */
             if ((hdr.algorithm & 0xF0u) != 0 &&
-                ctx->dict->lzp_table != NULL)
+                lzp_table != NULL)
             {
                 netc_lzp_xor_unfilter((const uint8_t *)dst, *dst_size,
-                                       ctx->dict->lzp_table, (uint8_t *)dst);
+                                       lzp_table, (uint8_t *)dst);
             }
 
-            /* Delta post-pass */
-            if ((hdr.flags & NETC_PKT_FLAG_DELTA) &&
-                ctx->prev_pkt != NULL &&
-                ctx->prev_pkt_size == *dst_size)
-            {
-                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
-                                           (uint8_t *)dst, *dst_size);
-            }
+            /* Delta post-pass (order-1 or order-2) */
+            decomp_delta_postpass(ctx, hdr.flags, dst, *dst_size);
 
-            /* Update delta predictor */
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, dst, *dst_size);
-                ctx->prev_pkt_size = *dst_size;
-            }
+            /* Update delta predictor (and prev2 rotation) */
+            decomp_update_prev(ctx, dst, *dst_size);
             /* Ring buffer update */
             decomp_ring_append(ctx, (const uint8_t *)dst, *dst_size);
 
@@ -620,6 +638,7 @@ netc_result_t netc_decompress(
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
             netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -633,11 +652,8 @@ netc_result_t netc_decompress(
             if (r != NETC_OK) return r;
             *dst_size = hdr.original_size;
 
-            /* Update delta predictor */
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, dst, *dst_size);
-                ctx->prev_pkt_size = *dst_size;
-            }
+            /* Update delta predictor (and prev2 rotation) */
+            decomp_update_prev(ctx, dst, *dst_size);
             /* Ring buffer update — MUST happen after decode (ring used as input above) */
             decomp_ring_append(ctx, (const uint8_t *)dst, *dst_size);
 
@@ -648,6 +664,7 @@ netc_result_t netc_decompress(
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
             netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -655,7 +672,7 @@ netc_result_t netc_decompress(
             /* LZP XOR + tANS: wire format is identical to NETC_ALG_TANS
              * (same MREG/X2/BIGRAM sub-flags), but after tANS decode we
              * apply the LZP XOR inverse filter to recover original bytes. */
-            if (ctx->dict == NULL || ctx->dict->lzp_table == NULL)
+            if (ctx->dict == NULL || lzp_table == NULL)
                 return NETC_ERR_DICT_INVALID;
 
             r = decode_tans(ctx->dict, tables, &hdr, payload,
@@ -667,22 +684,13 @@ netc_result_t netc_decompress(
              * compression.  Operates in-place since netc_lzp_xor_unfilter
              * reads from src and writes to dst (can alias for in-place). */
             netc_lzp_xor_unfilter((const uint8_t *)dst, *dst_size,
-                                   ctx->dict->lzp_table, (uint8_t *)dst);
+                                   lzp_table, (uint8_t *)dst);
 
-            /* Delta post-pass (if delta was also applied) */
-            if ((hdr.flags & NETC_PKT_FLAG_DELTA) &&
-                ctx->prev_pkt != NULL &&
-                ctx->prev_pkt_size == *dst_size)
-            {
-                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
-                                           (uint8_t *)dst, *dst_size);
-            }
+            /* Delta post-pass (order-1 or order-2) */
+            decomp_delta_postpass(ctx, hdr.flags, dst, *dst_size);
 
-            /* Update delta predictor */
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, dst, *dst_size);
-                ctx->prev_pkt_size = *dst_size;
-            }
+            /* Update delta predictor (and prev2 rotation) */
+            decomp_update_prev(ctx, dst, *dst_size);
             /* Ring buffer update */
             decomp_ring_append(ctx, (const uint8_t *)dst, *dst_size);
 
@@ -693,6 +701,7 @@ netc_result_t netc_decompress(
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
             netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 
@@ -733,20 +742,11 @@ netc_result_t netc_decompress(
 
             *dst_size = hdr.original_size;
 
-            /* Delta post-pass */
-            if ((hdr.flags & NETC_PKT_FLAG_DELTA) &&
-                ctx->prev_pkt != NULL &&
-                ctx->prev_pkt_size == *dst_size)
-            {
-                ctx->simd_ops.delta_decode(ctx->prev_pkt, (const uint8_t *)dst,
-                                           (uint8_t *)dst, *dst_size);
-            }
+            /* Delta post-pass (order-1 or order-2) */
+            decomp_delta_postpass(ctx, hdr.flags, dst, *dst_size);
 
-            /* Update delta predictor */
-            if (ctx->prev_pkt != NULL) {
-                memcpy(ctx->prev_pkt, dst, *dst_size);
-                ctx->prev_pkt_size = *dst_size;
-            }
+            /* Update delta predictor (and prev2 rotation) */
+            decomp_update_prev(ctx, dst, *dst_size);
             /* Ring buffer update */
             decomp_ring_append(ctx, (const uint8_t *)dst, *dst_size);
 
@@ -757,6 +757,7 @@ netc_result_t netc_decompress(
             }
             ctx->context_seq = (uint8_t)(hdr.context_seq + 1);
             netc_adaptive_update(ctx, (const uint8_t *)dst, *dst_size);
+            netc_lzp_adaptive_update(ctx->adapt_lzp, (const uint8_t *)dst, *dst_size);
             return NETC_OK;
         }
 

@@ -92,7 +92,11 @@ netc_ctx_t *netc_ctx_create(const netc_dict_t *dict, const netc_cfg_t *cfg) {
         ctx->adapt_freq = (uint32_t *)calloc(NETC_CTX_COUNT * 256, sizeof(uint32_t));
         ctx->adapt_total = (uint32_t *)calloc(NETC_CTX_COUNT, sizeof(uint32_t));
         ctx->adapt_tables = (netc_tans_table_t *)calloc(NETC_CTX_COUNT, sizeof(netc_tans_table_t));
-        if (!ctx->adapt_freq || !ctx->adapt_total || !ctx->adapt_tables) {
+        /* Order-2 delta: allocate prev2_pkt for linear extrapolation */
+        ctx->prev2_pkt = (uint8_t *)calloc(1, NETC_MAX_PACKET_SIZE);
+        ctx->prev2_pkt_size = 0;
+        if (!ctx->adapt_freq || !ctx->adapt_total || !ctx->adapt_tables || !ctx->prev2_pkt) {
+            free(ctx->prev2_pkt);
             free(ctx->adapt_tables);
             free(ctx->adapt_total);
             free(ctx->adapt_freq);
@@ -105,6 +109,21 @@ netc_ctx_t *netc_ctx_create(const netc_dict_t *dict, const netc_cfg_t *cfg) {
         /* Clone initial tables from dict so first packets can encode/decode */
         if (dict) {
             memcpy(ctx->adapt_tables, dict->tables, NETC_CTX_COUNT * sizeof(netc_tans_table_t));
+            /* Clone LZP table if present in dict */
+            if (dict->lzp_table != NULL) {
+                ctx->adapt_lzp = (netc_lzp_entry_t *)malloc(
+                    NETC_LZP_HT_SIZE * sizeof(netc_lzp_entry_t));
+                if (ctx->adapt_lzp != NULL) {
+                    memcpy(ctx->adapt_lzp, dict->lzp_table,
+                           NETC_LZP_HT_SIZE * sizeof(netc_lzp_entry_t));
+                    /* Boost dict entries to confidence 4 so they survive a few
+                     * misses before being replaced by adaptive updates. */
+                    for (uint32_t j = 0; j < NETC_LZP_HT_SIZE; j++) {
+                        if (ctx->adapt_lzp[j].valid)
+                            ctx->adapt_lzp[j].valid = 4;
+                    }
+                }
+            }
         }
         ctx->adapt_pkt_count = 0;
     }
@@ -121,6 +140,8 @@ void netc_ctx_destroy(netc_ctx_t *ctx) {
     if (ctx == NULL) {
         return;
     }
+    free(ctx->prev2_pkt);
+    free(ctx->adapt_lzp);
     free(ctx->adapt_tables);
     free(ctx->adapt_total);
     free(ctx->adapt_freq);
@@ -150,13 +171,28 @@ void netc_ctx_reset(netc_ctx_t *ctx) {
     ctx->context_seq = 0;
     memset(&ctx->stats, 0, sizeof(ctx->stats));
 
-    /* Reset adaptive state: zero accumulators, re-clone dict tables */
+    /* Reset order-2 delta state */
+    if (ctx->prev2_pkt != NULL) {
+        memset(ctx->prev2_pkt, 0, NETC_MAX_PACKET_SIZE);
+        ctx->prev2_pkt_size = 0;
+    }
+
+    /* Reset adaptive state: zero accumulators, re-clone dict tables + LZP */
     if (ctx->adapt_freq) {
         memset(ctx->adapt_freq, 0, NETC_CTX_COUNT * 256 * sizeof(uint32_t));
         memset(ctx->adapt_total, 0, NETC_CTX_COUNT * sizeof(uint32_t));
         /* Re-clone tables from dict baseline */
         if (ctx->dict) {
             memcpy(ctx->adapt_tables, ctx->dict->tables, NETC_CTX_COUNT * sizeof(netc_tans_table_t));
+            /* Re-clone LZP table from dict baseline */
+            if (ctx->adapt_lzp && ctx->dict->lzp_table) {
+                memcpy(ctx->adapt_lzp, ctx->dict->lzp_table,
+                       NETC_LZP_HT_SIZE * sizeof(netc_lzp_entry_t));
+                for (uint32_t j = 0; j < NETC_LZP_HT_SIZE; j++) {
+                    if (ctx->adapt_lzp[j].valid)
+                        ctx->adapt_lzp[j].valid = 4;
+                }
+            }
         }
         ctx->adapt_pkt_count = 0;
     }

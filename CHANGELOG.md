@@ -11,6 +11,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 
+- **Adaptive cross-packet learning** (`NETC_CFG_FLAG_ADAPTIVE`, `0x200U`) — stateful mode that adapts compression model to the live data stream. Three phases:
+  - **Phase 1 — Adaptive tANS frequency tables**: Per-bucket frequency accumulators track byte distributions across packets. Tables rebuilt every 128 packets with 3/4 accumulated + 1/4 dict baseline blending. Encoder and decoder rebuild independently but stay in sync (both feed raw bytes post-decode).
+  - **Phase 2 — Adaptive LZP hash updates**: Mutable LZP table cloned from dict at context creation. Confidence-based decay: hits boost confidence, misses decrement, depleted entries replaced. Dict entries start at confidence=4 to survive initial misses.
+  - **Phase 3 — Order-2 delta prediction**: Linear extrapolation `predicted[i] = 2*prev[i] - prev2[i]`. Compressor tries order-2 when prev2 available and sizes match; keeps whichever (order-1 or order-2) produces more zero residuals. Wire format: RLE flag repurposed as order-2 signal (DELTA+RLE = order-2). Compact header types 0xD4-0xD7.
+  - Context memory: ~1020 KB with all phases enabled (struct + 64KB ring + 131KB arena + 2×64KB prev/prev2 + 424KB adaptive tables + 256KB adaptive LZP + 16KB freq accumulators).
+  - New tests: 16 adaptive tests including 10K-packet sustained simulation and memory usage verification.
+
 - **Bigram-PCTX encoder** (`netc_tans_encode_pctx_bigram`, `netc_tans_decode_pctx_bigram`) — per-position context-adaptive tANS that switches tables using BOTH byte offset (bucket) AND previous-byte bigram class. Combines PCTX's per-position entropy specialization with bigram's conditional context modeling. Compressor automatically tries bigram-PCTX alongside unigram PCTX and keeps the smaller output. New compact packet types 0xD0-0xD3 for PCTX+BIGRAM variants. **Result: 1-7% ratio improvement across all workloads. netc now beats OodleNetwork UDP on WL-004 (32B) and WL-005 (512B).**
 - **Adaptive frequency normalization** — replaced Laplace smoothing (add-1 to all 256 symbols) with two-phase floor+proportional normalization. All symbols get freq=1 floor (256 of 4096 slots), remaining 3840 slots distributed proportionally to seen-only symbols. Yields tighter probability estimates by not wasting table resolution on unseen bytes.
 
