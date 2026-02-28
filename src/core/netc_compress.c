@@ -714,6 +714,7 @@ static int try_tans_compress(
      * Always try PCTX for multi-bucket packets. For small packets (<512B),
      * also try single-region best-fit and keep the smaller result. */
     if (dst_payload_cap >= state_sz) {
+        /* --- Unigram PCTX trial --- */
         netc_bsw_t bsw;
         netc_bsw_init(&bsw, dst + state_sz, dst_payload_cap - state_sz);
 
@@ -724,6 +725,44 @@ static int try_tans_compress(
             size_t pctx_bs = netc_bsw_flush(&bsw);
             if (pctx_bs != (size_t)-1) {
                 size_t pctx_total = state_sz + pctx_bs;
+                int    pctx_is_bigram = 0;
+
+                /* --- Bigram-PCTX trial: per-position bigram table switching ---
+                 * Only when bigram is enabled and bigram tables exist.
+                 * If bigram-PCTX is smaller, re-encode into dst and use it. */
+                if ((ctx_flags & NETC_CFG_FLAG_BIGRAM) &&
+                    dict->bigram_tables[0][0].valid)
+                {
+                    netc_bsw_t bsw_bg;
+                    netc_bsw_init(&bsw_bg, dst + state_sz, dst_payload_cap - state_sz);
+
+                    uint32_t bg_state = netc_tans_encode_pctx_bigram(
+                        dict->bigram_tables, dict->tables, dict->bigram_class_map,
+                        src, src_size, &bsw_bg, NETC_TANS_TABLE_SIZE);
+
+                    if (bg_state != 0) {
+                        size_t bg_bs = netc_bsw_flush(&bsw_bg);
+                        if (bg_bs != (size_t)-1) {
+                            size_t bg_total = state_sz + bg_bs;
+                            if (bg_total < pctx_total) {
+                                /* Bigram-PCTX wins — dst already has the bigram bitstream */
+                                pctx_total    = bg_total;
+                                pctx_state    = bg_state;
+                                pctx_is_bigram = 1;
+                            } else {
+                                /* Unigram PCTX wins — re-encode unigram into dst
+                                 * (bigram trial clobbered it) */
+                                netc_bsw_t bsw_re;
+                                netc_bsw_init(&bsw_re, dst + state_sz,
+                                              dst_payload_cap - state_sz);
+                                pctx_state = netc_tans_encode_pctx(
+                                    dict->tables, src, src_size,
+                                    &bsw_re, NETC_TANS_TABLE_SIZE);
+                                netc_bsw_flush(&bsw_re);
+                            }
+                        }
+                    }
+                }
 
                 /* For small packets, also try single-region best-fit to compare.
                  * Skipped when NETC_INTERNAL_SKIP_SR is set (pre-filtered data:
@@ -756,7 +795,7 @@ static int try_tans_compress(
                 else
                     netc_write_u32_le(dst, pctx_state);
                 *compressed_payload_size = pctx_total;
-                *used_mreg_flag = 2; /* signal PCTX to caller */
+                *used_mreg_flag = pctx_is_bigram ? 3 : 2; /* 3 = PCTX+BIGRAM, 2 = PCTX */
                 *used_x2_flag   = 0;
                 *out_table_idx  = 0;
                 return 0;
@@ -1177,14 +1216,17 @@ case_b_skip:;
                 }
             }
 
-            /* tANS wins.  used_mreg: 0=single-region, 1=MREG, 2=PCTX.
+            /* tANS wins.  used_mreg: 0=single-region, 1=MREG, 2=PCTX, 3=PCTX+BIGRAM.
              * Single-region: encode table index in upper 4 bits of algorithm byte.
              * MREG: algorithm=NETC_ALG_TANS, flags|=MREG.
              * PCTX: algorithm=NETC_ALG_TANS_PCTX (per-position context).
+             * PCTX+BIGRAM: algorithm=NETC_ALG_TANS_PCTX, flags|=BIGRAM.
              * 10-bit: algorithm=NETC_ALG_TANS_10 (adaptive small-packet). */
+            int bigram_active = (used_mreg == 3) ||
+                                (used_mreg <= 1 && (tans_ctx_flags & NETC_CFG_FLAG_BIGRAM));
             uint8_t extra_flags = (used_mreg == 1 ? NETC_PKT_FLAG_MREG : 0)
                                 | (used_x2   ? NETC_PKT_FLAG_X2     : 0)
-                                | ((tans_ctx_flags & NETC_CFG_FLAG_BIGRAM) ? NETC_PKT_FLAG_BIGRAM : 0);
+                                | (bigram_active ? NETC_PKT_FLAG_BIGRAM : 0);
             netc_pkt_header_t hdr;
             hdr.original_size   = (uint16_t)src_size;
             hdr.compressed_size = (uint16_t)compressed_payload;
@@ -1193,14 +1235,14 @@ case_b_skip:;
                 hdr.algorithm = (uint8_t)(NETC_ALG_TANS_10 | (tbl_idx << 4));
             } else if (did_lzp) {
                 /* LZP XOR pre-filter was applied; signal decompressor to invert.
-                 * For PCTX: use NETC_ALG_TANS_PCTX | 0x10 (upper nibble marks LZP).
+                 * For PCTX/PCTX+BIGRAM: use NETC_ALG_TANS_PCTX | 0x10 (upper nibble marks LZP).
                  * For single-region/MREG: algorithm = NETC_ALG_LZP. */
-                if (used_mreg == 2) {
+                if (used_mreg == 2 || used_mreg == 3) {
                     hdr.algorithm = NETC_ALG_TANS_PCTX | 0x10u;
                 } else {
                     hdr.algorithm = (uint8_t)(NETC_ALG_LZP | ((used_mreg ? 0u : tbl_idx) << 4));
                 }
-            } else if (used_mreg == 2) {
+            } else if (used_mreg == 2 || used_mreg == 3) {
                 hdr.algorithm = NETC_ALG_TANS_PCTX;
             } else {
                 hdr.algorithm = (uint8_t)(NETC_ALG_TANS | ((used_mreg ? 0u : tbl_idx) << 4));
@@ -1355,9 +1397,11 @@ case_b_skip:;
             }
 
             /* Raw tANS succeeds — emit without the delta flag but preserve bigram */
+            int raw_bigram_active = (raw_mreg == 3) ||
+                                    (raw_mreg <= 1 && (raw_ctx_flags & NETC_CFG_FLAG_BIGRAM));
             uint8_t extra_flags = (raw_mreg == 1 ? NETC_PKT_FLAG_MREG : 0)
                                 | (raw_x2   ? NETC_PKT_FLAG_X2   : 0)
-                                | ((raw_ctx_flags & NETC_CFG_FLAG_BIGRAM) ? NETC_PKT_FLAG_BIGRAM : 0);
+                                | (raw_bigram_active ? NETC_PKT_FLAG_BIGRAM : 0);
             netc_pkt_header_t hdr;
             hdr.original_size   = (uint16_t)src_size;
             hdr.compressed_size = (uint16_t)raw_payload;
@@ -1365,12 +1409,12 @@ case_b_skip:;
             if (raw_tans_10) {
                 hdr.algorithm = (uint8_t)(NETC_ALG_TANS_10 | (raw_tbl << 4));
             } else if (fallback_lzp) {
-                if (raw_mreg == 2) {
+                if (raw_mreg == 2 || raw_mreg == 3) {
                     hdr.algorithm = NETC_ALG_TANS_PCTX | 0x10u;
                 } else {
                     hdr.algorithm = (uint8_t)(NETC_ALG_LZP | ((raw_mreg ? 0u : raw_tbl) << 4));
                 }
-            } else if (raw_mreg == 2) {
+            } else if (raw_mreg == 2 || raw_mreg == 3) {
                 hdr.algorithm = NETC_ALG_TANS_PCTX;
             } else {
                 hdr.algorithm = (uint8_t)(NETC_ALG_TANS | ((raw_mreg ? 0u : raw_tbl) << 4));

@@ -323,6 +323,48 @@ int netc_tans_decode_pctx(
 );
 
 /* =========================================================================
+ * Per-position context-adaptive BIGRAM tANS encoder (PCTX+BIGRAM)
+ *
+ * Encodes src[0..src_size) in a SINGLE ANS stream, switching the
+ * probability table per byte using BOTH position bucket AND bigram class:
+ *   tbl = bigram_tables[netc_ctx_bucket(i)][netc_bigram_class(prev_byte, class_map)]
+ *
+ * Falls back to unigram tables[bucket] if bigram table is invalid.
+ * prev_byte at position 0 is implicitly 0x00 (packet start).
+ *
+ * Returns final state (initial state for decoder), or 0 on error.
+ * ========================================================================= */
+
+uint32_t netc_tans_encode_pctx_bigram(
+    const netc_tans_table_t bigram_tables[][NETC_BIGRAM_CTX_COUNT],
+    const netc_tans_table_t *unigram_tables,  /* fallback: array of NETC_CTX_COUNT */
+    const uint8_t           *class_map,        /* 256-byte bigram class map (may be NULL → v4 fallback) */
+    const uint8_t           *src,
+    size_t                   src_size,
+    netc_bsw_t              *bsw,
+    uint32_t                 initial_state
+);
+
+/* =========================================================================
+ * Per-position context-adaptive BIGRAM tANS decoder (PCTX+BIGRAM)
+ *
+ * Decodes dst_size symbols, switching tables per byte using BOTH position
+ * bucket AND bigram class derived from the previously decoded byte.
+ *
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_pctx_bigram(
+    const netc_tans_table_t bigram_tables[][NETC_BIGRAM_CTX_COUNT],
+    const netc_tans_table_t *unigram_tables,  /* fallback: array of NETC_CTX_COUNT */
+    const uint8_t           *class_map,        /* 256-byte bigram class map (may be NULL → v4 fallback) */
+    netc_bsr_t              *bsr,
+    uint8_t                 *dst,
+    size_t                   dst_size,
+    uint32_t                 initial_state
+);
+
+/* =========================================================================
  * 10-bit tANS table builder
  *
  * Builds encode and decode tables from a normalized frequency table.

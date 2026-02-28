@@ -500,6 +500,123 @@ int netc_tans_decode_pctx(
 }
 
 /* =========================================================================
+ * netc_tans_encode_pctx_bigram
+ *
+ * Per-position context-adaptive BIGRAM encoder.  Processes bytes in reverse
+ * order (standard ANS), switching the probability table per byte using BOTH
+ * position bucket AND bigram class:
+ *   bucket = netc_ctx_bucket(i)
+ *   bclass = netc_bigram_class(src[i-1], class_map)  (prev_byte at pos 0 = 0x00)
+ *   tbl    = bigram_tables[bucket][bclass]  (fallback to unigram if invalid)
+ *
+ * Returns final state (initial state for decoder), or 0 on error.
+ * ========================================================================= */
+
+uint32_t netc_tans_encode_pctx_bigram(
+    const netc_tans_table_t bigram_tables[][NETC_BIGRAM_CTX_COUNT],
+    const netc_tans_table_t *unigram_tables,
+    const uint8_t           *class_map,
+    const uint8_t           *src,
+    size_t                   src_size,
+    netc_bsw_t              *bsw,
+    uint32_t                 initial_state)
+{
+    if (!bigram_tables || !unigram_tables || !src || !bsw || src_size == 0)
+        return 0;
+
+    uint32_t X = initial_state;
+    if (X < NETC_TANS_TABLE_SIZE) X = NETC_TANS_TABLE_SIZE;
+
+    for (size_t i = src_size; i-- > 0; ) {
+        uint32_t bucket = netc_ctx_bucket((uint32_t)i);
+
+        /* Bigram context: previous byte (position i-1), or 0x00 at start */
+        uint8_t prev_byte = (i > 0) ? src[i - 1] : 0x00u;
+        uint32_t bclass = netc_bigram_class(prev_byte, class_map);
+
+        const netc_tans_table_t *tbl = &bigram_tables[bucket][bclass];
+        if (!tbl->valid) tbl = &unigram_tables[bucket];
+        if (!tbl->valid) return 0;
+
+        uint8_t sym = src[i];
+        const netc_tans_encode_entry_t *e = &tbl->encode[sym];
+        uint32_t f     = e->freq;
+        uint32_t lower = e->lower;
+        int      nb_hi = (int)e->nb_hi;
+
+        if (f == 0) return 0;
+
+        int      nb = (nb_hi == 0 || X >= lower) ? nb_hi : nb_hi - 1;
+        uint32_t j  = (X >> (uint32_t)nb) - f;
+
+        if (nb > 0) {
+            if (netc_bsw_write(bsw, X & ((1U << (uint32_t)nb) - 1U), nb) != 0)
+                return 0;
+        }
+
+        X = (uint32_t)tbl->encode_state[(uint32_t)e->cumul + j];
+    }
+
+    return X;
+}
+
+/* =========================================================================
+ * netc_tans_decode_pctx_bigram
+ *
+ * Per-position context-adaptive BIGRAM decoder.  Decodes bytes in forward
+ * order, switching the decode table per byte using BOTH position bucket AND
+ * bigram class derived from the previously decoded byte:
+ *   bucket = netc_ctx_bucket(i)
+ *   bclass = netc_bigram_class(dst[i-1], class_map)  (prev at pos 0 = 0x00)
+ *   tbl    = bigram_tables[bucket][bclass]  (fallback to unigram if invalid)
+ *
+ * Returns 0 on success, -1 on corrupt input.
+ * ========================================================================= */
+
+int netc_tans_decode_pctx_bigram(
+    const netc_tans_table_t bigram_tables[][NETC_BIGRAM_CTX_COUNT],
+    const netc_tans_table_t *unigram_tables,
+    const uint8_t           *class_map,
+    netc_bsr_t              *bsr,
+    uint8_t                 *dst,
+    size_t                   dst_size,
+    uint32_t                 initial_state)
+{
+    if (!bigram_tables || !unigram_tables || !bsr || !dst || dst_size == 0)
+        return -1;
+
+    uint32_t X = initial_state;
+    if (X < NETC_TANS_TABLE_SIZE || X >= 2U * NETC_TANS_TABLE_SIZE) return -1;
+
+    for (size_t i = 0; i < dst_size; i++) {
+        uint32_t bucket = netc_ctx_bucket((uint32_t)i);
+
+        /* Bigram context: previous decoded byte, or 0x00 at start */
+        uint8_t prev_byte = (i > 0) ? dst[i - 1] : 0x00u;
+        uint32_t bclass = netc_bigram_class(prev_byte, class_map);
+
+        const netc_tans_table_t *tbl = &bigram_tables[bucket][bclass];
+        if (!tbl->valid) tbl = &unigram_tables[bucket];
+        if (!tbl->valid) return -1;
+
+        uint32_t slot = X - NETC_TANS_TABLE_SIZE;
+        const netc_tans_decode_entry_t *d = &tbl->decode[slot];
+
+        dst[i] = d->symbol;
+
+        int      nb       = d->nb_bits;
+        uint32_t bits_val = 0;
+        if (nb > 0) {
+            if (netc_bsr_read(bsr, nb, &bits_val) != 0) return -1;
+        }
+
+        X = (uint32_t)d->next_state_base + bits_val;
+    }
+
+    return 0;
+}
+
+/* =========================================================================
  * netc_freq_rescale_12_to_10
  *
  * Rescales a 4096-sum frequency table to a 1024-sum frequency table.

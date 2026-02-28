@@ -442,7 +442,13 @@ static const netc_pkt_type_entry_t netc_pkt_type_table[256] = {
     [0xCE] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (14u<<4) },
     [0xCF] = { NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_10 | (15u<<4) },
 
-    /* 0xD0-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
+    /* 0xD0-0xD3: PCTX + BIGRAM variants */
+    [0xD0] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX },
+    [0xD1] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX },
+    [0xD2] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
+    [0xD3] = { NETC_PKT_FLAG_BIGRAM | NETC_PKT_FLAG_DELTA | NETC_PKT_FLAG_DICT_ID, NETC_ALG_TANS_PCTX | 0x10u },
+
+    /* 0xD4-0xFE: reserved (zero-initialized → flags=0, algorithm=0 → invalid) */
     /* 0xFF: legacy sentinel */
     [0xFF] = { 0xFF, 0xFF },
 };
@@ -467,6 +473,7 @@ static NETC_INLINE uint8_t netc_compact_type_encode(uint8_t flags, uint8_t algor
     /* PCTX */
     if (alg_lo == NETC_ALG_TANS_PCTX) {
         uint8_t lzp = (bucket != 0) ? 1u : 0u; /* high nibble signals LZP */
+        if (bigram) return (uint8_t)(0xD0u + delta + lzp * 2u);
         return (uint8_t)(0x04u + delta + lzp * 2u);
     }
 

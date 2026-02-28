@@ -544,7 +544,8 @@ netc_result_t netc_decompress(
 
         case NETC_ALG_TANS_PCTX: {
             /* Per-position context-adaptive tANS: single stream, table switches
-             * per byte offset.  Wire format: [state_sz initial_state][bitstream]. */
+             * per byte offset.  Wire format: [state_sz initial_state][bitstream].
+             * When BIGRAM flag is set, also switches bigram class per byte. */
             if (ctx->dict == NULL) return NETC_ERR_DICT_INVALID;
             const size_t pctx_state_sz = compact_mode ? 2u : 4u;
             if (hdr.compressed_size < pctx_state_sz) return NETC_ERR_CORRUPT;
@@ -561,9 +562,19 @@ netc_result_t netc_decompress(
             netc_bsr_t bsr;
             netc_bsr_init(&bsr, bits, bits_sz);
 
-            if (netc_tans_decode_pctx(ctx->dict->tables, &bsr,
-                                       (uint8_t *)dst, hdr.original_size,
-                                       initial_state) != 0)
+            int pctx_rc;
+            if ((hdr.flags & NETC_PKT_FLAG_BIGRAM) &&
+                ctx->dict->bigram_tables[0][0].valid) {
+                pctx_rc = netc_tans_decode_pctx_bigram(
+                    ctx->dict->bigram_tables, ctx->dict->tables,
+                    ctx->dict->bigram_class_map,
+                    &bsr, (uint8_t *)dst, hdr.original_size, initial_state);
+            } else {
+                pctx_rc = netc_tans_decode_pctx(
+                    ctx->dict->tables, &bsr,
+                    (uint8_t *)dst, hdr.original_size, initial_state);
+            }
+            if (pctx_rc != 0)
                 return NETC_ERR_CORRUPT;
 
             *dst_size = hdr.original_size;
@@ -820,7 +831,8 @@ netc_result_t netc_decompress_stateless(
                                NULL, 0, 0);
 
         case NETC_ALG_TANS_PCTX: {
-            /* Per-position context-adaptive tANS (stateless path) */
+            /* Per-position context-adaptive tANS (stateless path).
+             * When BIGRAM flag is set, also switches bigram class per byte. */
             if (hdr.compressed_size < 4) return NETC_ERR_CORRUPT;
             uint32_t initial_state = netc_read_u32_le(payload);
             if (initial_state < NETC_TANS_TABLE_SIZE ||
@@ -830,9 +842,19 @@ netc_result_t netc_decompress_stateless(
             size_t bits_sz = hdr.compressed_size - 4;
             netc_bsr_t bsr;
             netc_bsr_init(&bsr, bits, bits_sz);
-            if (netc_tans_decode_pctx(dict->tables, &bsr,
-                                       (uint8_t *)dst, hdr.original_size,
-                                       initial_state) != 0)
+            int sl_pctx_rc;
+            if ((hdr.flags & NETC_PKT_FLAG_BIGRAM) &&
+                dict->bigram_tables[0][0].valid) {
+                sl_pctx_rc = netc_tans_decode_pctx_bigram(
+                    dict->bigram_tables, dict->tables,
+                    dict->bigram_class_map,
+                    &bsr, (uint8_t *)dst, hdr.original_size, initial_state);
+            } else {
+                sl_pctx_rc = netc_tans_decode_pctx(
+                    dict->tables, &bsr,
+                    (uint8_t *)dst, hdr.original_size, initial_state);
+            }
+            if (sl_pctx_rc != 0)
                 return NETC_ERR_CORRUPT;
             *dst_size = hdr.original_size;
             /* LZP XOR inverse: upper nibble of algorithm byte signals LZP */
