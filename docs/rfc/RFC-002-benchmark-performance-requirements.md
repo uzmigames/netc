@@ -608,4 +608,69 @@ make CC=gcc CFLAGS="-O3 -fprofile-use" clean all
 
 ---
 
+## 10. Throughput Optimization Implementation Notes
+
+### 10.1 Phase 1+2 Results (Windows x86_64, MSVC `/O2`, compact header + delta + dict)
+
+The `optimize-compress-throughput` task implemented three phases of compressor speedup,
+all with zero ratio regression in Phase 1 and ≤ 1% in Phase 2.
+
+| Workload | Baseline MB/s | Phase 1+2 MB/s | Speedup | Ratio Δ |
+|----------|:-------------:|:--------------:|:-------:|:-------:|
+| WL-004 32B | 44.5 | 84.3 | **1.89×** | +0.8% |
+| WL-001 64B | 26.0 | 43.2 | **1.66×** | 0% |
+| WL-002 128B | 29.9 | 47.8 | **1.60×** | 0% |
+| WL-003 256B | 38.8 | 58.2 | **1.50×** | 0% |
+| WL-005 512B | 36.9 | 63.8 | **1.73×** | +0.76% |
+
+**Techniques applied:**
+
+1. **SKIP_SR (`NETC_INTERNAL_SKIP_SR`)** — Pre-filtered data (delta residuals, LZP XOR output) has
+   position-specific byte distributions that PCTX (per-position tables) always handles better than any
+   single-region table. Skipping the SR trial saves 4-10 encode passes per packet with zero ratio loss.
+
+2. **Bucket LUT** — 256-byte lookup table replaces a 16-branch `netc_ctx_bucket()` chain, eliminating
+   branch mispredictions in the PCTX encode inner loop.
+
+3. **LZ77 small-packet guard** — LZ77 trial skipped for packets < 256B; 8 KB hash table init overhead
+   always exceeds any LZ77 gain at this size.
+
+4. **Adaptive LZP trial skip** — For packets > 256B, the delta-vs-LZP comparison trial is skipped when
+   `compressed_payload < src_size/2` (delta ratio already better than 0.5). For ≤ 256B, the LZP trial
+   runs unconditionally (position-aware model most effective on short structured packets).
+
+### 10.2 Speed Mode (`NETC_CFG_FLAG_FAST_COMPRESS`, bit 8)
+
+An optional encode-only flag provides further throughput at the cost of compression ratio.
+The decompressor does NOT need this flag; output is fully wire-compatible with normal decode.
+
+| Workload | Normal MB/s | Fast MB/s | Gain | Ratio Δ |
+|----------|:-----------:|:---------:|:----:|:-------:|
+| WL-004 32B | 84.3 | **123.1** | +46% | +9.9% |
+| WL-001 64B | 43.2 | **54.2** | +25% | +2.9% |
+| WL-002 128B | 47.8 | **51.6** | +8% | +6.2% |
+| WL-003 256B | 58.2 | **79.0** | +36% | +8.0% |
+| WL-005 512B | 63.8 | **72.1** | +13% | 0% |
+
+Speed mode disables:
+- PCTX vs single-region comparison (PCTX always used for multi-bucket packets)
+- Delta-vs-LZP comparison trial
+- LZ77 for packets < 512B (extended from 256B default)
+
+Bench CLI: add `--fast` to any benchmark invocation to enable speed mode.
+
+### 10.3 Gap to Section 1.1 Hard Requirements
+
+Current measured throughput on development hardware (Windows MSVC) is 40-120 MB/s vs the ≥ 2 GB/s
+target in §1.1. The gap is primarily platform and architecture:
+
+- §1.1 targets assume Linux + GCC 12 + `-march=native` (AVX2 enabled) on post-2018 server hardware
+- Development measurements use Windows + MSVC `/O2` without AVX2 auto-vectorization
+- SIMD (AVX2) on the hot tANS encode loop has not yet been implemented — this is the primary
+  remaining opportunity to reach the §1.1 throughput targets
+
+The Phase 1+2 optimizations (1.4-1.9×) are applied unconditionally and carry over to any platform.
+
+---
+
 *End of RFC-002*

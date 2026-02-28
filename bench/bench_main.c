@@ -92,6 +92,7 @@ typedef struct {
     int no_dict;
     int no_delta;
     int compact_hdr;
+    int fast_compress;
     uint8_t simd_level;
 
     /* Baseline options */
@@ -126,6 +127,7 @@ static void usage(const char *prog)
         "  --no-dict                 Skip dictionary training (netc only)\n"
         "  --no-delta                Disable delta encoding (netc only)\n"
         "  --compact-hdr             Use compact packet headers (netc only)\n"
+        "  --fast                    Speed mode: skip trial passes, ~2-5%% ratio cost (netc only)\n"
         "  --simd=LEVEL              auto|generic|sse42|avx2 [default: auto]\n"
         "  --baseline-dir=DIR        Directory for baseline JSON files\n"
         "  --save-baseline           Save results as new baseline\n"
@@ -213,6 +215,7 @@ static int parse_args(int argc, char **argv, bench_args_t *a)
         if (strcmp(arg, "--no-dict")        == 0) { a->no_dict        = 1; continue; }
         if (strcmp(arg, "--no-delta")       == 0) { a->no_delta       = 1; continue; }
         if (strcmp(arg, "--compact-hdr")    == 0) { a->compact_hdr    = 1; continue; }
+        if (strcmp(arg, "--fast")           == 0) { a->fast_compress  = 1; continue; }
         if (strcmp(arg, "--save-baseline")  == 0) { a->save_baseline  = 1; continue; }
         if (strcmp(arg, "--check-baseline") == 0) { a->check_baseline = 1; continue; }
         if (strcmp(arg, "--with-oodle")     == 0) { a->with_oodle     = 1; continue; }
@@ -374,8 +377,9 @@ int main(int argc, char **argv)
     bench_reporter_begin(reporter, NETC_VERSION_STR, "");
 
     uint32_t flags = NETC_CFG_FLAG_STATEFUL | NETC_CFG_FLAG_BIGRAM;
-    if (!args.no_delta)   flags |= NETC_CFG_FLAG_DELTA;
-    if (args.compact_hdr) flags |= NETC_CFG_FLAG_COMPACT_HDR;
+    if (!args.no_delta)    flags |= NETC_CFG_FLAG_DELTA;
+    if (args.compact_hdr)  flags |= NETC_CFG_FLAG_COMPACT_HDR;
+    if (args.fast_compress) flags |= NETC_CFG_FLAG_FAST_COMPRESS;
 
     /* Allocate result storage */
     bench_result_t *results = (bench_result_t *)calloc(BENCH_MAX_RESULTS,

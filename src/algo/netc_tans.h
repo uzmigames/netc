@@ -85,23 +85,40 @@ static NETC_INLINE uint32_t netc_bigram_class(uint8_t prev_byte,
 
 /* Map a byte offset to its 16-way context bucket index.
  * Bucket boundaries are chosen to give 8-byte resolution for small packets
- * and progressively coarser resolution for larger offsets. */
+ * and progressively coarser resolution for larger offsets.
+ *
+ * Hot-path optimization: offsets 0-255 (all game packets ≤255B) are resolved
+ * via a 256-byte LUT, eliminating up to 16 branch comparisons per call.
+ * Offsets ≥256 fall through to a 5-if chain (rare for game packets). */
 static NETC_INLINE uint32_t netc_ctx_bucket(uint32_t offset) {
-    if (offset <    8U) return  0U;   /* [0..7]       */
-    if (offset <   16U) return  1U;   /* [8..15]      */
-    if (offset <   24U) return  2U;   /* [16..23]     */
-    if (offset <   32U) return  3U;   /* [24..31]     */
-    if (offset <   48U) return  4U;   /* [32..47]     */
-    if (offset <   64U) return  5U;   /* [48..63]     */
-    if (offset <   96U) return  6U;   /* [64..95]     */
-    if (offset <  128U) return  7U;   /* [96..127]    */
-    if (offset <  192U) return  8U;   /* [128..191]   */
-    if (offset <  256U) return  9U;   /* [192..255]   */
-    if (offset <  384U) return 10U;   /* [256..383]   */
-    if (offset <  512U) return 11U;   /* [384..511]   */
-    if (offset < 1024U) return 12U;   /* [512..1023]  */
-    if (offset < 4096U) return 13U;   /* [1024..4095] */
-    if (offset <16384U) return 14U;   /* [4096..16383]*/
+    /* Pre-computed LUT for offsets 0-255 */
+    static const uint8_t bucket_lut[256] = {
+        /* [0..7]     bucket 0 */ 0,0,0,0,0,0,0,0,
+        /* [8..15]    bucket 1 */ 1,1,1,1,1,1,1,1,
+        /* [16..23]   bucket 2 */ 2,2,2,2,2,2,2,2,
+        /* [24..31]   bucket 3 */ 3,3,3,3,3,3,3,3,
+        /* [32..47]   bucket 4 */ 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+        /* [48..63]   bucket 5 */ 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        /* [64..95]   bucket 6 */ 6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+                                  6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        /* [96..127]  bucket 7 */ 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                                  7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        /* [128..191] bucket 8 */ 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+                                  8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+                                  8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+                                  8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+        /* [192..255] bucket 9 */ 9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,
+                                  9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,
+                                  9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,
+                                  9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9
+    };
+    if (NETC_LIKELY(offset < 256U)) return bucket_lut[offset];
+    /* Offsets ≥256 are uncommon in game packets (fallback chain) */
+    if (offset <  384U) return 10U;   /* [256..383]    */
+    if (offset <  512U) return 11U;   /* [384..511]    */
+    if (offset < 1024U) return 12U;   /* [512..1023]   */
+    if (offset < 4096U) return 13U;   /* [1024..4095]  */
+    if (offset <16384U) return 14U;   /* [4096..16383] */
     return 15U;                        /* [16384..65535]*/
 }
 

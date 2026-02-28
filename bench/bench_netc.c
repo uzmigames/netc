@@ -59,8 +59,9 @@ int bench_netc_init(bench_netc_t *n,
     const char *mode  = n->stateless ? "stateless" : "stateful";
     const char *delta = (flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
     const char *dct   = dict ? "+dict" : "";
-    snprintf(n->name, sizeof(n->name), "netc/%s%s%s simd=%u",
-             mode, delta, dct, simd_level);
+    const char *fast  = (flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
+    snprintf(n->name, sizeof(n->name), "netc/%s%s%s simd=%u%s",
+             mode, delta, dct, simd_level, fast);
 
     /* Create enc+dec context pair for stateful mode */
     if (!n->stateless) {
@@ -121,8 +122,9 @@ int bench_netc_train(bench_netc_t *n,
     /* Update name to reflect dict */
     const char *mode  = n->stateless ? "stateless" : "stateful";
     const char *delta = (n->flags & NETC_CFG_FLAG_DELTA) ? "+delta" : "";
-    snprintf(n->name, sizeof(n->name), "netc/%s%s+dict simd=%u",
-             mode, delta, (unsigned)n->simd_level);
+    const char *fast  = (n->flags & NETC_CFG_FLAG_FAST_COMPRESS) ? " fast=1" : "";
+    snprintf(n->name, sizeof(n->name), "netc/%s%s+dict simd=%u%s",
+             mode, delta, (unsigned)n->simd_level, fast);
 
     return 0;
 }

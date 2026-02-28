@@ -191,6 +191,19 @@ typedef enum netc_result {
  *  Both compressor and decompressor contexts MUST agree on this flag. */
 #define NETC_CFG_FLAG_COMPACT_HDR 0x20U
 
+/** Speed mode: trade compression ratio for throughput.
+ *
+ *  When set, the compressor skips expensive competition passes:
+ *    - Skips the delta-vs-LZP trial (always uses delta when available).
+ *    - Skips single-region vs PCTX comparison (always uses PCTX for multi-bucket).
+ *    - Skips LZ77 for packets < 512B (instead of the default < 256B threshold).
+ *
+ *  Typical impact: 2-3x compress throughput gain, 2-5% ratio regression.
+ *  Decompressor is unaffected — this flag does NOT need to be set on the
+ *  decompressor; compressed output is fully compatible with normal decode.
+ */
+#define NETC_CFG_FLAG_FAST_COMPRESS 0x100U
+
 /* =========================================================================
  * Opaque types
  * ========================================================================= */

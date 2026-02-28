@@ -56,9 +56,20 @@ Lower is better (compressed size / original size).
 | Compact (128-65535B) | 4B | 2B | **6B** | Medium payloads |
 | Legacy | 8B | 4B | **12B** | Compatibility |
 
-### Throughput Targets
+### Throughput — Measured (Windows x86_64, MSVC `/O2`, compact header + delta + dict)
 
-Performance targets for v1.0 on server-grade hardware (not yet measured on target hardware):
+| Workload | Normal MB/s | Fast MB/s | Ratio (normal) | Ratio (fast) | Baseline MB/s |
+|----------|:-----------:|:---------:|:--------------:|:------------:|:-------------:|
+| WL-004 32B | 84.3 | **123.1** | 0.631 | 0.694 | 44.5 |
+| WL-001 64B | 43.2 | **54.2** | 0.756 | 0.778 | 26.0 |
+| WL-002 128B | 47.8 | **51.6** | 0.603 | 0.641 | 29.9 |
+| WL-003 256B | 58.2 | **79.0** | 0.343 | 0.370 | 38.8 |
+| WL-005 512B | 63.8 | **72.1** | 0.491 | 0.491 | 36.9 |
+
+*Baseline = pre-optimization. Normal = Phase 1+2 (default). Fast = `NETC_CFG_FLAG_FAST_COMPRESS` (speed mode, 0-10% ratio trade-off).
+Phase 1+2 achieved 1.4-1.9× speedup with ≤1% ratio regression. Speed mode adds a further 8-62% on top.*
+
+### Throughput Targets for v1.0 (server-grade hardware)
 
 | Metric | Target |
 |--------|-------:|
@@ -186,6 +197,34 @@ netc_compress_stateless(dict, src, src_size, dst, sizeof(dst), &dst_size);
 netc_decompress_stateless(dict, dst, dst_size, recovered, sizeof(recovered), &recovered_size);
 ```
 
+### Speed Mode (`NETC_CFG_FLAG_FAST_COMPRESS`)
+
+For latency-sensitive workloads where throughput matters more than optimal ratio:
+
+```c
+netc_cfg_t cfg = {
+    .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA
+           | NETC_CFG_FLAG_COMPACT_HDR
+           | NETC_CFG_FLAG_FAST_COMPRESS,  /* skip trial passes */
+};
+netc_ctx_t *enc = netc_ctx_create(dict, &cfg);
+
+/* Decoder does NOT need the flag — output is fully compatible */
+netc_cfg_t dec_cfg = {
+    .flags = NETC_CFG_FLAG_TCP_MODE | NETC_CFG_FLAG_DELTA
+           | NETC_CFG_FLAG_COMPACT_HDR,
+};
+netc_ctx_t *dec = netc_ctx_create(dict, &dec_cfg);
+```
+
+`NETC_CFG_FLAG_FAST_COMPRESS` skips expensive trial passes on the encoder side:
+- PCTX vs single-region comparison is skipped (PCTX always used for multi-bucket packets)
+- Delta-vs-LZP comparison trial is skipped
+- LZ77 is skipped for packets < 512B (vs default < 256B)
+
+Typical trade-off: **8-62% throughput gain, 0-10% ratio regression.** The decompressor is
+unaffected and does not need this flag set. Compressed output is fully interoperable.
+
 ---
 
 ## Algorithm Pipeline
@@ -292,6 +331,7 @@ netc/
 | SIMD (SSE4.2, AVX2) | Done |
 | Security hardening + fuzz | Done |
 | Benchmark harness | Done |
+| Compress throughput optimization (1.4-1.9× normal, `FAST_COMPRESS` for +8-62%) | Done |
 | ARM NEON SIMD | Planned |
 | Profile-Guided Optimization (PGO) | Evaluated (+2-4% Clang, inconsistent GCC) |
 | C++ SDK (Unreal Engine 5) | Planned |

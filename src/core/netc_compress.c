@@ -32,6 +32,14 @@
  * for LZP (0x70-0x8F) cannot represent X2, so encoding must be single-state. */
 #define NETC_INTERNAL_NO_X2  (1U << 31)
 
+/* Internal-only flag: skip single-region comparison in try_tans_compress().
+ * When set, PCTX is used directly for multi-bucket packets without trying
+ * single-region best-fit tables. Set when the input is delta residuals or
+ * LZP-filtered data — both have position-specific byte distributions that
+ * PCTX (per-position tables) handles better than any single-region table.
+ * Expected ratio regression: <1% (PCTX dominates for structured pre-filtered data). */
+#define NETC_INTERNAL_SKIP_SR (1U << 30)
+
 /* =========================================================================
  * Internal: FNV-1a hash of 3 bytes folded to 4096 (for ring_ht)
  * ========================================================================= */
@@ -717,8 +725,11 @@ static int try_tans_compress(
             if (pctx_bs != (size_t)-1) {
                 size_t pctx_total = state_sz + pctx_bs;
 
-                /* For small packets, also try single-region best-fit to compare */
-                if (src_size <= 512u) {
+                /* For small packets, also try single-region best-fit to compare.
+                 * Skipped when NETC_INTERNAL_SKIP_SR is set (pre-filtered data:
+                 * delta residuals or LZP XOR output) — PCTX with per-position
+                 * tables dominates any single-region table for these inputs. */
+                if (src_size <= 512u && !(ctx_flags & NETC_INTERNAL_SKIP_SR)) {
                     uint8_t trial_buf[520];
                     size_t  sr_cp = 0;
                     int     sr_mreg = 0, sr_x2 = 0;
@@ -850,6 +861,12 @@ netc_result_t netc_compress(
         uint32_t tans_ctx_flags = ctx->flags;
         if (did_lzp && compact_mode)
             tans_ctx_flags |= NETC_INTERNAL_NO_X2;
+        /* Skip single-region comparison for pre-filtered data (delta residuals
+         * or LZP XOR output).  Both have position-specific distributions where
+         * PCTX dominates any single-region table.  Saves 4-10 trial encodes.
+         * FAST_COMPRESS extends this to all paths — PCTX always wins. */
+        if (did_delta || did_lzp || (ctx->flags & NETC_CFG_FLAG_FAST_COMPRESS))
+            tans_ctx_flags |= NETC_INTERNAL_SKIP_SR;
 
         if (try_tans_compress(dict, compress_src, src_size,
                               payload, payload_cap,
@@ -866,8 +883,16 @@ netc_result_t netc_compress(
              * Strip BIGRAM from the trial flags: compact packet types for LZP
              * don't encode the BIGRAM flag (only LZP and LZP+DELTA are defined).
              * Using unigram tables in the trial matches what the decompressor
-             * will use after reading the compact header. */
-            if (did_delta && dict->lzp_table != NULL && src_size <= 512) {
+             * will use after reading the compact header.
+             *
+             * Adaptive skip: for large packets (>256B) where delta already
+             * achieves ratio < 0.5 (compressed_payload < src_size/2), LZP is
+             * unlikely to win — skip to save 1 LZP filter + 1 PCTX encode.
+             * For ≤256B packets LZP is kept unconditional (predictions accurate
+             * at short range; WL-001/002/003 depend on this for ratio). */
+            if (did_delta && dict->lzp_table != NULL && src_size <= 512 &&
+                !(ctx->flags & NETC_CFG_FLAG_FAST_COMPRESS) &&
+                (src_size <= 256u || compressed_payload >= (src_size >> 1))) {
                 uint8_t lzp_trial_src[512];
                 uint8_t lzp_trial_dst[520];
                 netc_lzp_xor_filter((const uint8_t *)src, src_size,
@@ -877,10 +902,13 @@ netc_result_t netc_compress(
                 int     lzp_mreg = 0, lzp_x2 = 0;
                 uint32_t lzp_tbl = 0;
                 /* Strip DELTA, suppress X2.  BIGRAM is now supported
-                 * via LZP+BIGRAM compact types (0x90-0xAF). */
+                 * via LZP+BIGRAM compact types (0x90-0xAF).
+                 * Also skip SR comparison — LZP-filtered data is optimally
+                 * encoded by PCTX (per-position tables trained on LZP output). */
                 uint32_t lzp_ctx = (ctx->flags
                     & ~(uint32_t)NETC_CFG_FLAG_DELTA)
-                    | (compact_mode ? NETC_INTERNAL_NO_X2 : 0u);
+                    | (compact_mode ? NETC_INTERNAL_NO_X2 : 0u)
+                    | NETC_INTERNAL_SKIP_SR;
                 if (try_tans_compress(dict, lzp_trial_src, src_size,
                                       lzp_trial_dst, sizeof(lzp_trial_dst),
                                       &lzp_cp, &lzp_mreg, &lzp_x2, &lzp_tbl,
@@ -912,7 +940,13 @@ netc_result_t netc_compress(
              *   If LZ77 loses: re-run tANS into dst payload.
              *   Re-run cost is bounded: only attempted for small packets (≤1024B)
              *   where LZ77 probe is fast and tANS re-run is cheap. */
-            if (compressed_payload * 2 > src_size) {
+            /* Skip LZ77 for small packets (<256B, or <512B in FAST_COMPRESS mode):
+             * hash table init (8KB) + scan overhead exceeds the ratio gain.
+             * FAST_COMPRESS raises the threshold to 512B for extra speed. */
+            {
+            size_t lz77_min = (ctx->flags & NETC_CFG_FLAG_FAST_COMPRESS)
+                              ? 512u : 256u;
+            if (src_size >= lz77_min && compressed_payload * 2 > src_size) {
                 if (!did_delta && ctx->arena_size >= src_size) {
                     /* Case A: LZ77 into arena, tANS stays in dst payload.
                      * Always use raw src for LZ77 (not LZP-filtered data)
@@ -1018,6 +1052,7 @@ netc_result_t netc_compress(
                 }
 case_b_skip:;
             }
+            } /* end lz77_min block */
 
             /* Cross-packet LZ77 competition: try LZ77X when any of:
              * (a) tANS ratio is poor (> 0.5), or

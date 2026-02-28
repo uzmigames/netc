@@ -11,6 +11,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 
+- **Compress throughput optimizations** — `optimize-compress-throughput` task, Phase 1+2+3:
+  - **Phase 1 — SKIP_SR optimization** (`NETC_INTERNAL_SKIP_SR`): When input bytes are pre-filtered (delta residuals or LZP XOR output), PCTX (per-position tables) always dominates single-region tables. Skipping the single-region trial saves 4-10 encode passes per packet. Enables `NETC_CFG_FLAG_DELTA` and LZP paths to skip 8-16 redundant trial encodes. **Result: 1.35-1.9× throughput gain, 0% ratio regression.**
+  - **Phase 1 — Bucket LUT** (`netc_tans.h`): Replaced 16-branch `netc_ctx_bucket()` ladder with a 256-byte lookup table. Eliminates ~16 branch misses per multi-bucket packet in PCTX encode loop.
+  - **Phase 1 — LZ77 small-packet guard**: Skip LZ77 trial (8KB hash table init + full scan) for packets < 256B; LZ77 never wins on packets that small.
+  - **Phase 2 — Adaptive LZP trial skip**: For packets > 256B, skip the delta-vs-LZP comparison trial when `compressed_payload < src_size/2` (delta ratio < 0.5). LZP is unconditionally tried for ≤ 256B packets where position-aware predictions are most effective. **Result: WL-005 512B +28% throughput, +0.76% ratio regression (within 1% threshold).**
+  - **Phase 3 — `NETC_CFG_FLAG_FAST_COMPRESS` (0x100U)**: Optional speed mode for latency-sensitive workloads. Enables SKIP_SR for all paths (not just pre-filtered), skips LZP trial entirely, and extends LZ77 skip threshold to 512B. Decompressor does NOT need this flag; output is fully compatible with normal decode. **Result: 8-62% additional throughput gain over Phase 1+2 baseline, 0-10% ratio trade-off.** Enable with `--fast` in the bench CLI.
+
 - **Compact packet header** (`NETC_CFG_FLAG_COMPACT_HDR`) — variable-length wire format: 2 bytes for packets <= 127B, 4 bytes for 128-65535B. Opt-in per-context flag; legacy 8B header remains the default. Eliminates `compressed_size`, `model_id`, and `context_seq` from the wire (derived from context state).
 - **ANS state compaction** — when compact header is active, tANS initial state is encoded as `uint16` (2B) instead of `uint32` (4B). ANS state range [4096, 8192) fits in 13 bits. Saves 2B per packet on single-region tANS, 4B on dual-interleaved (X2) tANS.
 - **Packet type byte encoding** — single-byte structured encoding of `(flags, algorithm)` pairs replaces 2 separate header fields. 144 valid entries covering all tANS, LZP, PCTX, MREG, passthrough, and bucketed algorithm variants. Decode via const lookup table.
