@@ -1,24 +1,11 @@
-## 1. Core C++ Wrappers
-- [x] 1.1 Implement FNetcDict (RAII, TSharedRef-compatible, LoadFromFile, LoadFromBytes)
-- [x] 1.2 Implement FNetcContext (RAII, TCP and UDP modes, Compress/Decompress TArrayView API)
-- [x] 1.3 Implement FNetcTrainer (train from TArray<TArray<uint8>>, save/load dict)
-- [x] 1.4 Implement FNetcResult (error propagation compatible with UE_LOG and ensureMsgf)
-- [x] 1.5 Write unit tests (standalone C++17, no UE5 dependency) for all wrappers
+## 1. Standalone C++17 Wrappers
+- [x] 1.1 Implement netc::Dict (RAII, move-only, LoadFromBytes/File, SaveToBytes/File)
+- [x] 1.2 Implement netc::Context (RAII, TCP/UDP modes, Compress/Decompress std::vector API)
+- [x] 1.3 Implement netc::Trainer (corpus management, Train, Reset)
+- [x] 1.4 Implement netc::Result enum + ResultToString
+- [x] 1.5 Write unit tests (47 tests, Unity C framework)
+- [x] 1.6 CMake integration (NETC_BUILD_CPP_SDK option, netc_cpp static lib)
 
-## 2. UE5 Plugin
-- [ ] 2.1 Write NetcPlugin.uplugin descriptor (ThirdParty module declaration)
-- [ ] 2.2 Write NetcPlugin.Build.cs (UBT build rules, platform-conditional libnetc linking)
-- [ ] 2.3 Pre-build libnetc.a for Win64, Linux, Mac (CMake cross-compile in CI)
-- [ ] 2.4 Write platform detection for SIMD flags (MSVC /arch:AVX2, GCC -mavx2)
-
-## 3. UE5 Automation Tests
-- [ ] 3.1 Write IMPLEMENT_SIMPLE_AUTOMATION_TEST for FNetcDict load/save round-trip
-- [ ] 3.2 Write test for FNetcContext compress/decompress on game state packet (WL-001 equivalent)
-- [ ] 3.3 Write test for FNetcContext TCP stateful mode (multi-packet sequence)
-- [ ] 3.4 Write test for FNetcContext UDP stateless mode
-- [ ] 3.5 Write test for thread safety (multiple FNetcContext sharing one FNetcDict)
-
-## 4. Documentation
-- [ ] 4.1 Write docs/specs/sdk-cpp.md (installation, quick start, API reference, UE5 examples)
-- [ ] 4.2 Write sdk/cpp/README.md (plugin installation instructions)
-- [ ] 4.3 Update root README.md SDK section with accurate UE5 code examples
+## 2. Documentation
+- [ ] 2.1 Write sdk/cpp/README.md (install, API reference, examples)
+- [ ] 2.2 Update root README.md SDK section with C++ examples
